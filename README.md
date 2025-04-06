@@ -10,6 +10,7 @@ A Go tool for generating and validating Mermaid diagrams.
 - Validate Mermaid diagram syntax
 - Fix syntax errors in Mermaid diagrams with multiple retry attempts
 - Provide friendly explanations of syntax errors
+- Export diagrams as SVG files using mermaid-go library
 
 ## Installation
 
@@ -34,6 +35,18 @@ Generate a diagram for a component:
 Generate a project-wide diagram:
 ```bash
 ./mm-gen map [diagram-type]
+```
+
+### Exporting Diagrams
+
+Export diagrams as SVG files:
+```bash
+./mm-gen file [diagram-type] [file-path] --svg --outDir ./diagrams
+```
+
+Export project-wide diagrams:
+```bash
+./mm-gen map [diagram-type] --svg --outDir ./diagrams
 ```
 
 ### Validating Diagrams
@@ -80,6 +93,10 @@ Show verbose output during the fixing process:
 - `config`: Configuration structure diagram
 - `adapters`: Diagram showing inbound/outbound communications
 
+## Renderer Implementation
+
+The tool uses [anz-bank/mermaid-go](https://github.com/anz-bank/mermaid-go) library to render Mermaid diagrams to SVG format. This is a pure Go implementation of the Mermaid renderer which doesn't require any external dependencies.
+
 ## Examples
 
 Validate a Mermaid diagram and fix it if there are errors:
@@ -95,4 +112,9 @@ Validate a diagram with 5 retry attempts and verbose output:
 Generate a class diagram for a service:
 ```bash
 ./mm-gen component class service DiagramService
+```
+
+Generate a sequence diagram and export it as SVG:
+```bash
+./mm-gen map sequence --svg --outDir ./diagrams
 ``` 

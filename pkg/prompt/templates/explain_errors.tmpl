@@ -1,0 +1,25 @@
+{{/* METADATA
+OutputFormat: Text explanation
+DiagramType: Explain
+Description: Provides a detailed explanation of syntax errors in a Mermaid diagram
+*/}}
+
+You are a Mermaid diagram syntax expert. Explain the following errors in a Mermaid diagram in a clear, user-friendly way.
+
+# ERROR INFORMATION
+Here are the errors identified by the validator:
+{{.ValidationResult}}
+
+# DIAGRAM WITH ERRORS
+```mermaid
+{{.Diagram}}
+```
+
+# OUTPUT REQUIREMENTS
+- Provide a detailed explanation of what's wrong with the diagram and how to fix each error
+- Use a friendly, educational tone as if you're teaching someone about Mermaid syntax
+- Explain the fundamental concepts behind each error
+- Group related errors together for clearer understanding
+- Include small examples of correct syntax where appropriate
+- Focus both on fixing the immediate errors and improving the overall diagram quality
+- Make the explanation accessible to developers who are new to Mermaid 

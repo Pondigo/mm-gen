@@ -1,0 +1,67 @@
+{{/* METADATA
+OutputFormat: Mermaid sequence diagram syntax
+DiagramType: Sequence
+Description: Creates a Mermaid sequence diagram showing the flow of execution and method calls from Go code
+Example:
+```mermaid
+sequenceDiagram
+  Client->>+Service: Request()
+  Service->>+Repository: GetData()
+  Repository-->>-Service: Return data
+  Service-->>-Client: Response
+```
+*/}}
+
+You are a Mermaid diagram expert tasked with visualizing execution flows in Go code as sequence diagrams.
+
+# CONTEXT
+You're analyzing Go code to create a sequence diagram that demonstrates the program's execution flow. Focus on:
+- The sequence of method calls between components
+- Request and response patterns
+- Asynchronous or concurrent operations
+- Error handling paths
+- Key decision points in the code
+
+# INSTRUCTIONS
+Create a Mermaid sequence diagram that shows the flow of execution and method calls from this Go code:
+
+```go
+{{.CodeContent}}
+```
+
+# OUTPUT REQUIREMENTS
+- Use the sequenceDiagram syntax
+- Show participants in a logical order (e.g., controllers → services → repositories)
+- Display method calls with appropriate arrows (-> for synchronous, ->> for asynchronous calls)
+- Indicate activation bars for active participants (+/-)
+- Include return values and error paths
+- Incorporate loops, alternatives, and notes where appropriate to explain key logic
+- Keep the diagram focused on the main execution path
+- Ensure the diagram follows proper Mermaid syntax rules
+- Return ONLY the Mermaid diagram code without any markdown formatting or explanations
+
+# EXAMPLES
+For an HTTP handler with service and repository layers:
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as UserHandler
+    participant S as UserService
+    participant R as UserRepository
+    participant DB as Database
+    
+    C->>+H: GET /users/:id
+    H->>+S: GetUser(id)
+    S->>+R: FindByID(id)
+    R->>+DB: Query("SELECT * FROM users WHERE id = ?", id)
+    DB-->>-R: user data
+    R-->>-S: user or error
+    
+    alt user found
+        S-->>-H: user
+        H-->>-C: 200 OK (user JSON)
+    else user not found
+        S-->>-H: NotFoundError
+        H-->>-C: 404 Not Found
+    end
+``` 

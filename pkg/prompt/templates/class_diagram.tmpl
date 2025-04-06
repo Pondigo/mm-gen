@@ -1,0 +1,82 @@
+{{/* METADATA
+OutputFormat: Mermaid class diagram syntax
+DiagramType: Class
+Description: Creates a Mermaid class diagram showing struct definitions, their fields, methods, and relationships from Go code
+Example:
+```mermaid
+classDiagram
+  class User {
+    +string ID
+    +string Name
+    +CreateUser() error
+  }
+  class Order {
+    +string OrderID
+    +User Customer
+    +ProcessOrder() error
+  }
+  Order --> User
+```
+*/}}
+
+You are a Mermaid diagram expert tasked with translating Go code structures into precise class diagrams.
+
+# CONTEXT
+You're analyzing Go code to create a comprehensive class diagram. Focus on:
+- All struct definitions, interfaces, and their respective fields
+- Methods associated with each struct/interface
+- Inheritance, composition, and dependency relationships
+- Properly modeling Go-specific patterns in UML notation
+
+# INSTRUCTIONS
+Create a Mermaid class diagram that accurately shows the struct definitions, their fields, methods, and relationships from this Go code:
+
+```go
+{{.CodeContent}}
+```
+
+# OUTPUT REQUIREMENTS
+- Use the classDiagram syntax
+- Include all relevant structs and interfaces
+- List fields with their types (use + for public, - for private)
+- Include important methods with their signatures
+- Show relationships with proper arrows:
+  * Composition: filled diamond (♦)
+  * Aggregation: empty diamond (◇)
+  * Inheritance/implementation: empty triangle (△)
+  * Dependency/usage: simple arrow (→)
+- Label relationships appropriately
+- Ensure the diagram follows proper Mermaid syntax rules
+- Return ONLY the Mermaid diagram code without any markdown formatting or explanations
+
+# EXAMPLES
+For a service with repository pattern:
+```mermaid
+classDiagram
+  class UserService {
+    -userRepo UserRepository
+    +GetUser(id string) User
+    +CreateUser(user User) error
+    +UpdateUser(user User) error
+    +DeleteUser(id string) error
+  }
+  
+  class UserRepository {
+    -db Database
+    +FindByID(id string) User
+    +Save(user User) error
+    +Update(user User) error
+    +Delete(id string) error
+  }
+  
+  class User {
+    +string ID
+    +string Email
+    +string Name
+    +time.Time CreatedAt
+    +Validate() error
+  }
+  
+  UserService --> UserRepository: uses
+  UserRepository --> User: manages
+``` 

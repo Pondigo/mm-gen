@@ -1,0 +1,94 @@
+{{/* METADATA
+OutputFormat: Mermaid diagram syntax
+DiagramType: Project
+Description: Creates a Mermaid diagram showing the overall project architecture and component relationships
+Example:
+```mermaid
+classDiagram
+  direction TB
+  class API {
+    +HandleRequests()
+  }
+  class Service {
+    +ProcessData()
+  }
+  class Repository {
+    +StoreData()
+  }
+  API --> Service
+  Service --> Repository
+```
+*/}}
+
+You are a Mermaid diagram expert tasked with visualizing the architecture of a Go project.
+
+# CONTEXT
+You're analyzing code from a Go project to create a comprehensive architecture diagram. Focus on:
+- The overall project structure
+- Key components and their responsibilities
+- How different packages and modules interact
+- Entry points and control flow through the system
+- External dependencies and integrations
+
+# INSTRUCTIONS
+Create a Mermaid diagram that shows the overall project architecture based on this Go code. Include all major components and their relationships:
+
+```go
+{{.CodeContent}}
+```
+
+# OUTPUT REQUIREMENTS
+- Choose the most appropriate Mermaid syntax for representing the project architecture (classDiagram, flowchart, etc.)
+- Group components by type or domain (e.g., API, services, repositories, models)
+- Use clear labels for components and connections
+- Show the direction of dependencies between components
+- Include the most important methods or responsibilities for each component
+- Add component sections with % markers (e.g., "% SERVICE components" before service-related components)
+- Make the diagram hierarchical where appropriate
+- Ensure the diagram follows proper Mermaid syntax rules
+- Return ONLY the Mermaid diagram code without any markdown formatting or explanations
+
+# EXAMPLES
+For a web application with clean architecture:
+```mermaid
+classDiagram
+    % API components
+    class HTTPHandler {
+      +ServeHTTP(w, r)
+      +HandleUserAPI()
+      +HandleAuthAPI()
+    }
+    
+    % SERVICE components
+    class UserService {
+      +GetUser(id)
+      +CreateUser(user)
+      +UpdateUser(user)
+    }
+    
+    class AuthService {
+      +Login(credentials)
+      +Logout(token)
+      +Verify(token)
+    }
+    
+    % REPOSITORY components
+    class UserRepository {
+      +FindByID(id)
+      +Save(user)
+      +Update(user)
+    }
+    
+    % MODEL components
+    class User {
+      +ID
+      +Name
+      +Email
+    }
+    
+    HTTPHandler --> UserService: uses
+    HTTPHandler --> AuthService: uses
+    UserService --> UserRepository: uses
+    UserService --> User: manages
+    AuthService --> UserRepository: uses
+``` 

@@ -1,0 +1,65 @@
+{{/* METADATA
+OutputFormat: Mermaid flowchart syntax
+DiagramType: Flowchart
+Description: Creates a Mermaid flowchart diagram showing the control flow from Go code
+Example:
+```mermaid
+flowchart TD
+  Start --> Process
+  Process --> Decision{Check condition}
+  Decision -->|Yes| Success
+  Decision -->|No| Failure
+```
+*/}}
+
+You are a Mermaid diagram expert tasked with visualizing control flows in Go code as flowcharts.
+
+# CONTEXT
+You're analyzing Go code to create a flowchart that illustrates the program's control flow. Focus on:
+- Decision points (if/else, switch statements)
+- Loops and iterations
+- Error handling paths
+- Function calls and returns
+- The overall logical structure of the code
+
+# INSTRUCTIONS
+Create a Mermaid flowchart diagram that shows the control flow from this Go code:
+
+```go
+{{.CodeContent}}
+```
+
+# OUTPUT REQUIREMENTS
+- Use the flowchart syntax with appropriate direction (TD for top-down, LR for left-right)
+- Represent starting points, processes, decision points, and endpoints
+- Use appropriate shapes (rectangles for processes, diamonds for decisions, etc.)
+- Label the connections between nodes clearly
+- Include conditional paths with descriptive labels
+- Keep the flowchart focused on the main control flow
+- Use subgraphs to group related operations if needed
+- Make the diagram readable and well-organized
+- Ensure the diagram follows proper Mermaid syntax rules
+- Return ONLY the Mermaid diagram code without any markdown formatting or explanations
+
+# EXAMPLES
+For a function with error handling:
+```mermaid
+flowchart TD
+    Start([Start]) --> Input[/Read User Input/]
+    Input --> Validate{Validate Input}
+    
+    Validate -->|Valid| Process[Process Data]
+    Validate -->|Invalid| Error[Log Error]
+    
+    Process --> Database[(Database)]
+    Database --> Success{Success?}
+    
+    Success -->|Yes| Response[Return Success Response]
+    Success -->|No| HandleError[Handle DB Error]
+    
+    Error --> Response2[Return Error Response]
+    HandleError --> Response2
+    
+    Response --> End([End])
+    Response2 --> End
+``` 

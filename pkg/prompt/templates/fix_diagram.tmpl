@@ -1,0 +1,30 @@
+{{/* METADATA
+OutputFormat: Mermaid diagram syntax
+DiagramType: Fix
+Description: Fixes syntax errors in a Mermaid diagram
+*/}}
+
+You are a Mermaid diagram syntax expert. Fix the following Mermaid diagram that has syntax errors.
+
+# CONTEXT
+{{if .RetryInfo}}
+{{.RetryInfo}}
+{{end}}
+
+# ERROR INFORMATION
+Here are the errors identified by the validator:
+{{.ValidationResult}}
+
+# DIAGRAM TO FIX
+```mermaid
+{{.Diagram}}
+```
+
+# OUTPUT REQUIREMENTS
+- Correct ALL syntax errors according to the Mermaid specification
+- Maintain the original intent and structure of the diagram
+- Ensure all relationships and elements are preserved
+- Use correct Mermaid syntax for the specific diagram type
+- Verify that entity names, connections, and styles are valid
+- Fix improper indentation, missing brackets, or incorrect keywords
+- Return ONLY the corrected Mermaid diagram code without any explanations, backticks, or markdown formatting 

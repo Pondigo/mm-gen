@@ -7,6 +7,8 @@ import (
 	"mm-go-agent/pkg/mermaid"
 	"os"
 	"strconv"
+
+	"mm-go-agent/pkg/prompt"
 )
 
 // MaxFixRetries is the default number of retries for fixing Mermaid diagrams
@@ -15,6 +17,7 @@ const MaxFixRetries = 3
 // ValidationService handles the validation of Mermaid diagrams
 type ValidationService struct {
 	llmClient  llm.Client
+	promptMgr  *prompt.TemplateManager
 	maxRetries int
 }
 
@@ -28,8 +31,16 @@ func NewValidationService(llmClient llm.Client) *ValidationService {
 		}
 	}
 
+	// Create a prompt template manager
+	promptMgr, err := prompt.New()
+	if err != nil {
+		// Fall back to nil if templates can't be loaded
+		promptMgr = nil
+	}
+
 	return &ValidationService{
 		llmClient:  llmClient,
+		promptMgr:  promptMgr,
 		maxRetries: maxRetries,
 	}
 }
@@ -61,16 +72,21 @@ func (s *ValidationService) FixMermaidDiagramWithLLM(ctx context.Context, diagra
 	for fixAttempts < s.maxRetries {
 		fixAttempts++
 
-		// Create context for the LLM from the validation result
-		validationContext := mermaid.ValidationResultAsContext(currentResult)
+		// Generate prompt for fixing the diagram
+		var prompt string
+		var err error
 
-		// Add information about previous attempts if this is a retry
-		retryInfo := ""
-		if fixAttempts > 1 {
-			retryInfo = fmt.Sprintf("\nThis is fix attempt %d/%d. Previous attempts still had errors.", fixAttempts, s.maxRetries)
-		}
-
-		prompt := fmt.Sprintf(`
+		if s.promptMgr != nil {
+			// Use the template manager if available
+			prompt, err = s.promptMgr.GetFixPrompt(currentDiagram, currentResult, fixAttempts, s.maxRetries)
+			if err != nil {
+				// Fall back to manual prompt construction if template fails
+				validationContext := mermaid.ValidationResultAsContext(currentResult)
+				retryInfo := ""
+				if fixAttempts > 1 {
+					retryInfo = fmt.Sprintf("\nThis is fix attempt %d/%d. Previous attempts still had errors.", fixAttempts, s.maxRetries)
+				}
+				prompt = fmt.Sprintf(`
 You are a Mermaid diagram syntax expert. Fix the following Mermaid diagram that has syntax errors.
 Here are the errors identified by the validator:%s
 
@@ -83,6 +99,28 @@ Here is the diagram to fix:
 Please provide a complete, fixed version of the diagram that resolves all syntax errors.
 Only respond with the corrected Mermaid diagram code, without any explanations or markdown formatting.
 `, retryInfo, validationContext, currentDiagram)
+			}
+		} else {
+			// Fall back to manual prompt construction if template manager is not available
+			validationContext := mermaid.ValidationResultAsContext(currentResult)
+			retryInfo := ""
+			if fixAttempts > 1 {
+				retryInfo = fmt.Sprintf("\nThis is fix attempt %d/%d. Previous attempts still had errors.", fixAttempts, s.maxRetries)
+			}
+			prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Fix the following Mermaid diagram that has syntax errors.
+Here are the errors identified by the validator:%s
+
+%s
+
+Here is the diagram to fix:
+
+%s
+
+Please provide a complete, fixed version of the diagram that resolves all syntax errors.
+Only respond with the corrected Mermaid diagram code, without any explanations or markdown formatting.
+`, retryInfo, validationContext, currentDiagram)
+		}
 
 		response, err := s.llmClient.GenerateText(ctx, prompt)
 		if err != nil {
@@ -119,10 +157,17 @@ func (s *ValidationService) ExplainMermaidDiagramErrors(ctx context.Context, val
 		return "The Mermaid diagram is valid. No errors to explain.", nil
 	}
 
-	// Create context for the LLM from the validation result
-	validationContext := mermaid.ValidationResultAsContext(validationResult)
+	// Generate prompt for explaining errors
+	var prompt string
+	var err error
 
-	prompt := fmt.Sprintf(`
+	if s.promptMgr != nil {
+		// Use the template manager if available
+		prompt, err = s.promptMgr.GetExplanationPrompt(validationResult.Diagram, validationResult)
+		if err != nil {
+			// Fall back to manual prompt construction if template fails
+			validationContext := mermaid.ValidationResultAsContext(validationResult)
+			prompt = fmt.Sprintf(`
 You are a Mermaid diagram syntax expert. Explain the following errors in a Mermaid diagram in a clear, user-friendly way.
 Here are the errors identified by the validator:
 
@@ -135,6 +180,24 @@ Here is the diagram with errors:
 Please provide a detailed explanation of what's wrong with the diagram and how to fix each error.
 Use a friendly, educational tone as if you're teaching someone about Mermaid syntax.
 `, validationContext, validationResult.Diagram)
+		}
+	} else {
+		// Fall back to manual prompt construction if template manager is not available
+		validationContext := mermaid.ValidationResultAsContext(validationResult)
+		prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Explain the following errors in a Mermaid diagram in a clear, user-friendly way.
+Here are the errors identified by the validator:
+
+%s
+
+Here is the diagram with errors:
+
+%s
+
+Please provide a detailed explanation of what's wrong with the diagram and how to fix each error.
+Use a friendly, educational tone as if you're teaching someone about Mermaid syntax.
+`, validationContext, validationResult.Diagram)
+	}
 
 	response, err := s.llmClient.GenerateText(ctx, prompt)
 	if err != nil {

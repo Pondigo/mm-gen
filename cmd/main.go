@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"mm-go-agent/internal/adapter/llm"
+	"mm-go-agent/internal/adapter/renderer"
 	"mm-go-agent/internal/repository"
+	fileOutputRepo "mm-go-agent/internal/repository/file"
 	"mm-go-agent/internal/service"
+	"mm-go-agent/internal/service/diagram"
 	pkgllm "mm-go-agent/pkg/llm"
 )
 
@@ -30,7 +34,11 @@ func main() {
 			diagramType := args[0]
 			filePath := args[1]
 
-			generateAndPrintDiagram(diagramType, filePath, "")
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, filePath, "", outDir, svgFormat, false, renderer)
 		},
 	}
 
@@ -45,7 +53,11 @@ func main() {
 			componentType := args[1]
 			componentName := args[2]
 
-			generateAndPrintDiagram(diagramType, "", fmt.Sprintf("%s:%s", componentType, componentName))
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, "", fmt.Sprintf("%s:%s", componentType, componentName), outDir, svgFormat, false, renderer)
 		},
 	}
 
@@ -58,9 +70,28 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			diagramType := args[0]
 
-			generateAndPrintDiagram(diagramType, "", "map")
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			splitOutput, _ := cmd.Flags().GetBool("split")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, "", "map", outDir, svgFormat, splitOutput, renderer)
 		},
 	}
+
+	// Add outDir and svg flag
+	mapCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	mapCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	mapCmd.Flags().BoolP("split", "p", false, "Split project map into separate files by component type")
+	mapCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (mermaid)")
+
+	// Add same flags to other commands
+	fileCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	fileCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	fileCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (mermaid)")
+	componentCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	componentCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	componentCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (mermaid)")
 
 	// Command for validating Mermaid diagram syntax
 	var validateCmd = &cobra.Command{
@@ -69,7 +100,7 @@ func main() {
 		Long:  "Validate Mermaid diagram syntax and report any errors. Can read from a file or stdin.",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			var diagram string
+			var diagramContent string
 
 			// Get diagram content from file or stdin
 			if len(args) > 0 {
@@ -79,7 +110,7 @@ func main() {
 					fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 					os.Exit(1)
 				}
-				diagram = string(content)
+				diagramContent = string(content)
 			} else {
 				// Read from stdin
 				content, err := io.ReadAll(os.Stdin)
@@ -87,10 +118,10 @@ func main() {
 					fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
 					os.Exit(1)
 				}
-				diagram = string(content)
+				diagramContent = string(content)
 			}
 
-			validateDiagram(diagram, cmd)
+			validateDiagram(diagramContent, cmd)
 		},
 	}
 
@@ -118,31 +149,46 @@ func main() {
 	}
 }
 
-func generateAndPrintDiagram(diagramType, filePath, target string) {
-	// Initialize dependencies
-	fileRepo := repository.NewFileRepository()
+func generateAndPrintDiagram(diagramType, filePath, target, outDir string, svgFormat bool, splitOutput bool, rendererType string) {
+	// Initialize the file repository
+	fileRepoForDiagram := repository.NewFileRepository()
+
+	// Initialize LLM adapter
 	llmAdapter, err := llm.NewClaudeAdapter("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing LLM: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Initialize service
-	diagramService := service.NewDiagramService(fileRepo, llmAdapter)
+	// Initialize diagram generation service
+	diagramService := service.NewDiagramService(fileRepoForDiagram, llmAdapter)
+
+	// Initialize output service components
+	diagramProcessor := diagram.NewProcessor()
+
+	// Create the appropriate renderer based on the renderer type
+	var svgRenderer renderer.Renderer
+	// Always use MermaidRenderer regardless of input
+	svgRenderer = renderer.NewMermaidRenderer()
+
+	fileOutputRepo := fileOutputRepo.NewOutputRepository()
+
+	// Initialize output service
+	outputService := diagram.NewOutputService(diagramProcessor, svgRenderer, fileOutputRepo)
 
 	// Generate diagram
 	ctx := context.Background()
-	var diagram string
+	var diagramContent string
 
 	if filePath != "" {
 		// Generate diagram for a single file
-		diagram, err = diagramService.GenerateDiagram(ctx, filePath, diagramType)
+		diagramContent, err = diagramService.GenerateDiagram(ctx, filePath, diagramType)
 	} else if target == "map" {
 		// Generate project-wide diagram
-		diagram, err = diagramService.GenerateProjectDiagram(ctx, diagramType)
+		diagramContent, err = diagramService.GenerateProjectDiagram(ctx, diagramType)
 	} else {
 		// Generate component diagram
-		diagram, err = diagramService.GenerateComponentDiagram(ctx, target, diagramType)
+		diagramContent, err = diagramService.GenerateComponentDiagram(ctx, target, diagramType)
 	}
 
 	if err != nil {
@@ -150,8 +196,56 @@ func generateAndPrintDiagram(diagramType, filePath, target string) {
 		os.Exit(1)
 	}
 
-	// Print diagram
-	fmt.Println(diagram)
+	// If this is a project map and split is requested, handle separately
+	if target == "map" && splitOutput && outDir != "" {
+		if err := outputService.SaveSplitDiagram(diagramContent, diagramType, outDir, svgFormat); err != nil {
+			fmt.Fprintf(os.Stderr, "Error splitting diagram: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// If outDir is specified, save to file
+	if outDir != "" {
+		// Create filename based on diagram type and target
+		var filename string
+		if filePath != "" {
+			baseName := filepath.Base(filePath)
+			filename = fmt.Sprintf("%s_%s", baseName, diagramType)
+		} else if target == "map" {
+			filename = fmt.Sprintf("project_%s", diagramType)
+		} else {
+			filename = fmt.Sprintf("component_%s", diagramType)
+		}
+
+		// Clean the diagram content
+		cleanedContent := diagramProcessor.CleanDiagramOutput(diagramContent)
+
+		// Save diagram
+		if svgFormat {
+			// Convert to SVG
+			svgContent, err := svgRenderer.ConvertToSVG(cleanedContent)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error converting to SVG: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Save both MMD and SVG files
+			if err := fileOutputRepo.SaveDiagramFiles(outDir, filename, cleanedContent, svgContent); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving diagram files: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Save just the MMD file
+			if err := fileOutputRepo.SaveDiagramFile(outDir, filename, cleanedContent, "mmd"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving diagram file: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// Print diagram to stdout
+		fmt.Println(diagramProcessor.CleanDiagramOutput(diagramContent))
+	}
 }
 
 // validateDiagram validates a Mermaid diagram and outputs the result

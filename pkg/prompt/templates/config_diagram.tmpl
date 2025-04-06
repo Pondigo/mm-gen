@@ -1,0 +1,79 @@
+{{/* METADATA
+OutputFormat: Mermaid diagram syntax
+DiagramType: Config
+Description: Creates a Mermaid diagram showing how configuration is structured and used throughout the application
+Example:
+```mermaid
+flowchart TD
+  Config[Configuration]
+  Config --> Database
+  Config --> API
+  Config --> Services
+```
+*/}}
+
+You are a Mermaid diagram expert tasked with visualizing how configuration is structured and used in a Go application.
+
+# CONTEXT
+You're analyzing Go code to understand and document the configuration system. Focus on:
+- How configuration is loaded, stored, and accessed
+- Configuration sources (files, environment variables, command-line flags)
+- How different components use configuration values
+- Relationships between configuration sections
+- Validation and default values
+
+# INSTRUCTIONS
+Create a Mermaid diagram that shows how configuration is structured and used throughout the application based on this Go code:
+
+```go
+{{.CodeContent}}
+```
+
+# OUTPUT REQUIREMENTS
+- Choose the most appropriate Mermaid syntax for representing the configuration structure
+- Include configuration sources and loading mechanisms
+- Show how configuration is passed to or accessed by different components
+- Display key configuration options and their relationships
+- Use clear labels and organization
+- Include validation or default value logic
+- Ensure the diagram follows proper Mermaid syntax rules
+- Return ONLY the Mermaid diagram code without any markdown formatting or explanations
+
+# EXAMPLES
+For an application with multiple configuration sources:
+```mermaid
+flowchart TD
+    subgraph Sources
+        Files[Config Files]
+        Env[Environment Variables]
+        Flags[Command-line Flags]
+    end
+    
+    subgraph Config["Configuration Structure"]
+        DB[Database Config]
+        API[API Config]
+        Logging[Logging Config]
+        Auth[Auth Config]
+    end
+    
+    subgraph Components
+        Services[Services]
+        Repositories[Repositories]
+        Controllers[Controllers]
+        Middleware[Middleware]
+    end
+    
+    Files --> Load[Load Configuration]
+    Env --> Load
+    Flags --> Load
+    
+    Load --> Validate{Validate}
+    Validate -->|Invalid| Error[Log Error & Exit]
+    Validate -->|Valid| Config
+    
+    DB --> Repositories
+    API --> Controllers
+    Logging --> All[All Components]
+    Auth --> Middleware
+    Auth --> Services
+``` 

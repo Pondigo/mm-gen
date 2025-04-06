@@ -1,0 +1,66 @@
+classDiagram
+    class main
+    main : -main()
+    main : -generateAndPrintDiagram(string, string, string, string, bool, bool, string)
+    main : -validateDiagram(string, *cobra.Command)
+    
+    class cobra.Command
+    cobra.Command : +Use string
+    cobra.Command : +Short string
+    cobra.Command : +Long string
+    cobra.Command : +Args PositionalArgs
+    cobra.Command : +Run func(cmd *Command, args []string)
+    cobra.Command : +AddCommand(*Command)
+    cobra.Command : +Execute() error
+    cobra.Command : +Flags() *FlagSet
+    
+    class service.DiagramService
+    service.DiagramService : +GenerateDiagram(context.Context, string, string) (string, error)
+    service.DiagramService : +GenerateProjectDiagram(context.Context, string) (string, error)
+    service.DiagramService : +GenerateComponentDiagram(context.Context, string, string) (string, error)
+    
+    class diagram.Processor
+    diagram.Processor : +CleanDiagramOutput(string) string
+    
+    class diagram.OutputService
+    diagram.OutputService : +SaveSplitDiagram(string, string, string, bool) error
+    
+    class renderer.Renderer
+    <<interface>> renderer.Renderer
+    renderer.Renderer : +ConvertToSVG(string) (string, error)
+    
+    class renderer.GoldmarkRenderer
+    renderer.GoldmarkRenderer : +ConvertToSVG(string) (string, error)
+    
+    class renderer.KrokiRenderer
+    renderer.KrokiRenderer : +ConvertToSVG(string) (string, error)
+    
+    class renderer.MermaidRenderer
+    renderer.MermaidRenderer : +ConvertToSVG(string) (string, error)
+    
+    class renderer.NodeMermaidRenderer
+    renderer.NodeMermaidRenderer : +ConvertToSVG(string) (string, error)
+    renderer.NodeMermaidRenderer : +IsAvailable() bool
+    
+    class renderer.SVGRenderer
+    renderer.SVGRenderer : +ConvertToSVG(string) (string, error)
+    
+    class repository.FileRepository
+    
+    class fileOutputRepo.OutputRepository
+    fileOutputRepo.OutputRepository : +SaveDiagramFiles(string, string, string, string) error
+    fileOutputRepo.OutputRepository : +SaveDiagramFile(string, string, string, string) error
+    
+    main ..> cobra.Command : uses
+    main ..> service.DiagramService : uses
+    main ..> diagram.Processor : uses
+    main ..> diagram.OutputService : uses
+    main ..> renderer.Renderer : uses
+    renderer.Renderer <|.. renderer.GoldmarkRenderer : implements
+    renderer.Renderer <|.. renderer.KrokiRenderer : implements
+    renderer.Renderer <|.. renderer.MermaidRenderer : implements
+    renderer.Renderer <|.. renderer.NodeMermaidRenderer : implements
+    renderer.Renderer <|.. renderer.SVGRenderer : implements
+    diagram.OutputService --> renderer.Renderer : uses
+    diagram.OutputService --> fileOutputRepo.OutputRepository : uses
+    service.DiagramService --> repository.FileRepository : uses 

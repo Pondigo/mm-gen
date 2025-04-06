@@ -11,6 +11,7 @@ import (
 	"mm-go-agent/internal/adapter/llm"
 	"mm-go-agent/internal/repository"
 	"mm-go-agent/pkg/mermaid"
+	"mm-go-agent/pkg/prompt"
 )
 
 // DiagramService handles the generation of Mermaid diagrams
@@ -24,13 +25,21 @@ type DiagramService interface {
 type diagramService struct {
 	fileRepo   repository.FileRepository
 	llmAdapter llm.LLMAdapter
+	promptMgr  *prompt.TemplateManager
 }
 
 // NewDiagramService creates a new diagram service
 func NewDiagramService(fileRepo repository.FileRepository, llmAdapter llm.LLMAdapter) DiagramService {
+	promptMgr, err := prompt.New()
+	if err != nil {
+		// Fall back to empty manager if templates can't be loaded
+		promptMgr = &prompt.TemplateManager{}
+	}
+
 	return &diagramService{
 		fileRepo:   fileRepo,
 		llmAdapter: llmAdapter,
+		promptMgr:  promptMgr,
 	}
 }
 
@@ -42,18 +51,56 @@ func (s *diagramService) GenerateDiagram(ctx context.Context, filePath string, d
 		return "", fmt.Errorf("failed to read Go file: %w", err)
 	}
 
-	// Create prompt based on diagram type
-	dt := parseDiagramType(diagramType)
-	prompt := mermaid.CreatePrompt(codeContent, dt)
+	// Map the diagram type string to a DiagramType
+	dt := s.mapDiagramType(diagramType)
 
-	// Generate diagram using LLM
-	diagram, err := s.llmAdapter.GenerateCompletion(ctx, prompt)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate diagram: %w", err)
+	// Generate the prompt for the diagram
+	var promptText string
+	if s.promptMgr != nil {
+		// Use the template manager if available
+		promptText, err = s.promptMgr.GetDiagramPrompt(codeContent, dt)
+		if err != nil {
+			// Fall back to old method if template fails
+			promptText = mermaid.CreatePrompt(codeContent, dt)
+		}
+	} else {
+		// Use the old method if template manager is not available
+		promptText = mermaid.CreatePrompt(codeContent, dt)
 	}
 
-	// Format and return the diagram
-	return mermaid.FormatOutput(diagram), nil
+	// Generate the diagram using the LLM
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
+	if err != nil {
+		return "", fmt.Errorf("error generating diagram: %w", err)
+	}
+
+	// Format the output
+	formattedDiagram := mermaid.FormatOutput(diagramText)
+
+	// Validate and fix the diagram if needed
+	validationResult := mermaid.ValidateSyntax(formattedDiagram)
+
+	if !validationResult.IsValid {
+		fmt.Printf("Diagram for file %s has syntax errors, attempting to fix...\n", filePath)
+
+		// Create validation service for fixing diagrams
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+
+		// Try to fix the diagram
+		fixedDiagram, err := s.retryWithBackoff(ctx, "fix-file-diagram", func() (string, error) {
+			return validationService.FixMermaidDiagramWithLLM(ctx, formattedDiagram, validationResult)
+		})
+
+		if err != nil {
+			// If fixing failed, use the original but log the error
+			fmt.Printf("Warning: Failed to fix diagram for %s: %v\n", filePath, err)
+		} else {
+			fmt.Printf("Successfully fixed diagram for %s\n", filePath)
+			formattedDiagram = fixedDiagram
+		}
+	}
+
+	return formattedDiagram, nil
 }
 
 // GenerateComponentDiagram generates a Mermaid diagram for a specific component (service, repository, etc.)
@@ -91,20 +138,44 @@ func (s *diagramService) GenerateComponentDiagram(ctx context.Context, component
 	allCode := strings.Join(codeContents, "\n\n")
 
 	// Create prompt for component
-	dt := parseDiagramType(diagramType)
-	prompt := fmt.Sprintf("Please create a %s Mermaid diagram for the %s '%s' from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.",
-		dt, componentType, componentName, allCode)
+	promptText := fmt.Sprintf("Please create a %s Mermaid diagram for the %s '%s' from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.",
+		diagramType, componentType, componentName, allCode)
 
 	// Generate diagram using LLM
-	diagram, err := s.llmAdapter.GenerateCompletion(ctx, prompt)
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate diagram: %w", err)
 	}
 
-	return mermaid.FormatOutput(diagram), nil
+	formattedDiagram := mermaid.FormatOutput(diagramText)
+
+	// Validate and fix the diagram if needed
+	validationResult := mermaid.ValidateSyntax(formattedDiagram)
+
+	if !validationResult.IsValid {
+		fmt.Printf("Diagram for %s %s has syntax errors, attempting to fix...\n", componentType, componentName)
+
+		// Create validation service for fixing diagrams
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+
+		// Try to fix the diagram
+		fixedDiagram, err := s.retryWithBackoff(ctx, fmt.Sprintf("fix-%s-%s-diagram", componentType, componentName), func() (string, error) {
+			return validationService.FixMermaidDiagramWithLLM(ctx, formattedDiagram, validationResult)
+		})
+
+		if err != nil {
+			// If fixing failed, use the original but log the error
+			fmt.Printf("Warning: Failed to fix diagram for %s %s: %v\n", componentType, componentName, err)
+		} else {
+			fmt.Printf("Successfully fixed diagram for %s %s\n", componentType, componentName)
+			formattedDiagram = fixedDiagram
+		}
+	}
+
+	return formattedDiagram, nil
 }
 
-// GenerateProjectDiagram generates a project-wide Mermaid diagram
+// GenerateProjectDiagram generates project-wide Mermaid diagrams
 func (s *diagramService) GenerateProjectDiagram(ctx context.Context, diagramType string) (string, error) {
 	// Validate diagram type
 	if !isValidProjectDiagramType(diagramType) {
@@ -157,25 +228,50 @@ func (s *diagramService) GenerateProjectDiagram(ctx context.Context, diagramType
 	allCode := strings.Join(codeContents, "\n\n")
 
 	// Create prompt for project diagram
-	var prompt string
+	var promptText string
 	switch diagramType {
 	case "sequence":
-		prompt = fmt.Sprintf("Please create a sequence diagram showing the interactions between all components (services, repositories, adapters) in this Go project. Focus on the flow of calls between different components and how they interact:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+		promptText = fmt.Sprintf("Please create a sequence diagram showing the interactions between all components (services, repositories, adapters) in this Go project. Focus on the flow of calls between different components and how they interact:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
 	case "config":
-		prompt = fmt.Sprintf("Please create a diagram showing how configuration is structured and accessed throughout the application. Show config structs and how other components interact with them:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+		promptText = fmt.Sprintf("Please create a diagram showing how configuration is structured and accessed throughout the application. Show config structs and how other components interact with them:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
 	case "adapters":
-		prompt = fmt.Sprintf("Please create a diagram showing all inbound and outbound communications in the application. Focus on adapter components and how they interact with external systems and internal components:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+		promptText = fmt.Sprintf("Please create a diagram showing all inbound and outbound communications in the application. Focus on adapter components and how they interact with external systems and internal components:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
 	default:
-		prompt = fmt.Sprintf("Please create a diagram showing the overall architecture of this Go project based on the following code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+		promptText = fmt.Sprintf("Please create a diagram showing the overall architecture of this Go project based on the following code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
 	}
 
 	// Generate diagram using LLM
-	diagram, err := s.llmAdapter.GenerateCompletion(ctx, prompt)
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate diagram: %w", err)
 	}
 
-	return mermaid.FormatOutput(diagram), nil
+	formattedDiagram := mermaid.FormatOutput(diagramText)
+
+	// Validate and fix the diagram if needed
+	validationResult := mermaid.ValidateSyntax(formattedDiagram)
+
+	if !validationResult.IsValid {
+		fmt.Printf("Project diagram for type %s has syntax errors, attempting to fix...\n", diagramType)
+
+		// Create validation service for fixing diagrams
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+
+		// Try to fix the diagram
+		fixedDiagram, err := s.retryWithBackoff(ctx, fmt.Sprintf("fix-project-%s-diagram", diagramType), func() (string, error) {
+			return validationService.FixMermaidDiagramWithLLM(ctx, formattedDiagram, validationResult)
+		})
+
+		if err != nil {
+			// If fixing failed, use the original but log the error
+			fmt.Printf("Warning: Failed to fix project diagram for type %s: %v\n", diagramType, err)
+		} else {
+			fmt.Printf("Successfully fixed project diagram for type %s\n", diagramType)
+			formattedDiagram = fixedDiagram
+		}
+	}
+
+	return formattedDiagram, nil
 }
 
 // retryWithBackoff attempts to call the provided function with exponential backoff
@@ -276,12 +372,12 @@ func (s *diagramService) generateConcurrentClassDiagram(ctx context.Context) (st
 			fmt.Printf("Starting diagram generation for %s component\n", componentType)
 
 			// Create prompt for this component type
-			prompt := fmt.Sprintf("Please create a class diagram for the '%s' components in this Go project. Show their structs, interfaces, methods, and relationships:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", componentType, allCode)
+			promptText := fmt.Sprintf("Please create a class diagram for the '%s' components in this Go project. Show their structs, interfaces, methods, and relationships:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", componentType, allCode)
 
 			// Use retryWithBackoff for LLM calls
 			operation := fmt.Sprintf("generate-%s-diagram", componentType)
-			diagram, err := s.retryWithBackoff(ctx, operation, func() (string, error) {
-				return s.llmAdapter.GenerateCompletion(ctx, prompt)
+			diagramText, err := s.retryWithBackoff(ctx, operation, func() (string, error) {
+				return s.llmAdapter.GenerateCompletion(ctx, promptText)
 			})
 
 			// Release semaphore after LLM API call
@@ -293,7 +389,7 @@ func (s *diagramService) generateConcurrentClassDiagram(ctx context.Context) (st
 			}
 
 			// Validate and fix the diagram if needed
-			formattedDiagram := mermaid.FormatOutput(diagram)
+			formattedDiagram := mermaid.FormatOutput(diagramText)
 			validationResult := mermaid.ValidateSyntax(formattedDiagram)
 
 			if !validationResult.IsValid {
@@ -404,8 +500,8 @@ func (s *diagramService) generateConcurrentClassDiagram(ctx context.Context) (st
 	return combinedDiagram.String(), nil
 }
 
-// parseDiagramType converts a string to a DiagramType
-func parseDiagramType(dt string) mermaid.DiagramType {
+// mapDiagramType converts a string to a DiagramType
+func (s *diagramService) mapDiagramType(dt string) mermaid.DiagramType {
 	switch dt {
 	case "basic":
 		return mermaid.Basic

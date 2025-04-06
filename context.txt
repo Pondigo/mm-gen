@@ -1,0 +1,3155 @@
+//File: ./cmd/main.go
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+
+	"github.com/spf13/cobra"
+
+	"mm-go-agent/internal/adapter/llm"
+	"mm-go-agent/internal/adapter/renderer"
+	"mm-go-agent/internal/repository"
+	fileOutputRepo "mm-go-agent/internal/repository/file"
+	"mm-go-agent/internal/service"
+	"mm-go-agent/internal/service/diagram"
+	pkgllm "mm-go-agent/pkg/llm"
+)
+
+func main() {
+	var rootCmd = &cobra.Command{
+		Use:   "mm-gen",
+		Short: "Generate Mermaid diagrams from Go code",
+	}
+
+	// Command for generating diagram for a single file
+	var fileCmd = &cobra.Command{
+		Use:   "file [diagram-type] [file]",
+		Short: "Generate Mermaid diagram from a single Go file",
+		Args:  cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			diagramType := args[0]
+			filePath := args[1]
+
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, filePath, "", outDir, svgFormat, false, renderer)
+		},
+	}
+
+	// Command for generating diagram for a component
+	var componentCmd = &cobra.Command{
+		Use:   "component [diagram-type] [component-type] [component-name]",
+		Short: "Generate Mermaid diagram for a specific component (service, repository, adapter, etc.)",
+		Long:  "Generate Mermaid diagram for a specific component. Component types: service, repository, adapter, config, model",
+		Args:  cobra.ExactArgs(3),
+		Run: func(cmd *cobra.Command, args []string) {
+			diagramType := args[0]
+			componentType := args[1]
+			componentName := args[2]
+
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, "", fmt.Sprintf("%s:%s", componentType, componentName), outDir, svgFormat, false, renderer)
+		},
+	}
+
+	// Command for mapping the project
+	var mapCmd = &cobra.Command{
+		Use:   "map [diagram-type]",
+		Short: "Generate project-wide Mermaid diagrams",
+		Long:  "Generate project-wide Mermaid diagrams. Diagram types: sequence (component interactions), class (all components), config (config interactions), adapters (inbound/outbound communications)",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			diagramType := args[0]
+
+			outDir, _ := cmd.Flags().GetString("outDir")
+			svgFormat, _ := cmd.Flags().GetBool("svg")
+			splitOutput, _ := cmd.Flags().GetBool("split")
+			renderer, _ := cmd.Flags().GetString("renderer")
+
+			generateAndPrintDiagram(diagramType, "", "map", outDir, svgFormat, splitOutput, renderer)
+		},
+	}
+
+	// Add outDir and svg flag
+	mapCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	mapCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	mapCmd.Flags().BoolP("split", "p", false, "Split project map into separate files by component type")
+	mapCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (default, mermaid, node, goldmark)")
+
+	// Add same flags to other commands
+	fileCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	fileCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	fileCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (default, mermaid, node, goldmark)")
+	componentCmd.Flags().StringP("outDir", "o", "", "Output directory for generated diagrams")
+	componentCmd.Flags().BoolP("svg", "s", false, "Generate diagram in SVG format")
+	componentCmd.Flags().StringP("renderer", "r", "default", "SVG renderer to use (default, mermaid, node, goldmark)")
+
+	// Command for validating Mermaid diagram syntax
+	var validateCmd = &cobra.Command{
+		Use:   "validate [file]",
+		Short: "Validate Mermaid diagram syntax",
+		Long:  "Validate Mermaid diagram syntax and report any errors. Can read from a file or stdin.",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var diagramContent string
+
+			// Get diagram content from file or stdin
+			if len(args) > 0 {
+				// Read from file
+				content, err := os.ReadFile(args[0])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+					os.Exit(1)
+				}
+				diagramContent = string(content)
+			} else {
+				// Read from stdin
+				content, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+					os.Exit(1)
+				}
+				diagramContent = string(content)
+			}
+
+			validateDiagram(diagramContent, cmd)
+		},
+	}
+
+	// Add the explain flag to provide a more detailed explanation of errors
+	explainFlag := false
+	validateCmd.Flags().BoolVarP(&explainFlag, "explain", "e", false, "Provide a detailed explanation of syntax errors")
+
+	// Add the fix flag to attempt to fix the diagram
+	fixFlag := false
+	validateCmd.Flags().BoolVarP(&fixFlag, "fix", "f", false, "Attempt to fix syntax errors in the diagram")
+
+	// Add verbose flag to show more information about the fixing process
+	verboseFlag := false
+	validateCmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Show verbose output for the fixing process")
+
+	// Add retries flag to set the maximum number of retries
+	retriesFlag := 0
+	validateCmd.Flags().IntVarP(&retriesFlag, "retries", "r", 0, "Maximum number of retries for fixing (0 = use default/env var)")
+
+	rootCmd.AddCommand(fileCmd, componentCmd, mapCmd, validateCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func generateAndPrintDiagram(diagramType, filePath, target, outDir string, svgFormat bool, splitOutput bool, rendererType string) {
+	// Initialize the file repository
+	fileRepoForDiagram := repository.NewFileRepository()
+
+	// Initialize LLM adapter
+	llmAdapter, err := llm.NewClaudeAdapter("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing LLM: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize diagram generation service
+	diagramService := service.NewDiagramService(fileRepoForDiagram, llmAdapter)
+
+	// Initialize output service components
+	diagramProcessor := diagram.NewProcessor()
+
+	// Create the appropriate renderer based on the renderer type
+	var svgRenderer renderer.Renderer
+	switch rendererType {
+	case "mermaid":
+		svgRenderer = renderer.NewMermaidRenderer()
+	case "node":
+		nodeRenderer := renderer.NewNodeMermaidRenderer()
+		if !nodeRenderer.IsAvailable() {
+			fmt.Fprintf(os.Stderr, "Node.js renderer not available. Make sure Node.js and npx are installed. Using default renderer instead.\n")
+			svgRenderer = renderer.DefaultSVGRenderer()
+		} else {
+			svgRenderer = nodeRenderer
+		}
+	case "goldmark":
+		svgRenderer = renderer.NewGoldmarkRenderer()
+	case "default", "":
+		svgRenderer = renderer.DefaultSVGRenderer()
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown renderer type: %s. Using default renderer.\n", rendererType)
+		svgRenderer = renderer.DefaultSVGRenderer()
+	}
+
+	fileOutputRepo := fileOutputRepo.NewOutputRepository()
+
+	// Initialize output service
+	outputService := diagram.NewOutputService(diagramProcessor, svgRenderer, fileOutputRepo)
+
+	// Generate diagram
+	ctx := context.Background()
+	var diagramContent string
+
+	if filePath != "" {
+		// Generate diagram for a single file
+		diagramContent, err = diagramService.GenerateDiagram(ctx, filePath, diagramType)
+	} else if target == "map" {
+		// Generate project-wide diagram
+		diagramContent, err = diagramService.GenerateProjectDiagram(ctx, diagramType)
+	} else {
+		// Generate component diagram
+		diagramContent, err = diagramService.GenerateComponentDiagram(ctx, target, diagramType)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// If this is a project map and split is requested, handle separately
+	if target == "map" && splitOutput && outDir != "" {
+		if err := outputService.SaveSplitDiagram(diagramContent, diagramType, outDir, svgFormat); err != nil {
+			fmt.Fprintf(os.Stderr, "Error splitting diagram: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// If outDir is specified, save to file
+	if outDir != "" {
+		// Create filename based on diagram type and target
+		var filename string
+		if filePath != "" {
+			baseName := filepath.Base(filePath)
+			filename = fmt.Sprintf("%s_%s", baseName, diagramType)
+		} else if target == "map" {
+			filename = fmt.Sprintf("project_%s", diagramType)
+		} else {
+			filename = fmt.Sprintf("component_%s", diagramType)
+		}
+
+		// Clean the diagram content
+		cleanedContent := diagramProcessor.CleanDiagramOutput(diagramContent)
+
+		// Save diagram
+		if svgFormat {
+			// Convert to SVG
+			svgContent, err := svgRenderer.ConvertToSVG(cleanedContent)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error converting to SVG: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Save both MMD and SVG files
+			if err := fileOutputRepo.SaveDiagramFiles(outDir, filename, cleanedContent, svgContent); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving diagram files: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Save just the MMD file
+			if err := fileOutputRepo.SaveDiagramFile(outDir, filename, cleanedContent, "mmd"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving diagram file: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// Print diagram to stdout
+		fmt.Println(diagramProcessor.CleanDiagramOutput(diagramContent))
+	}
+}
+
+// validateDiagram validates a Mermaid diagram and outputs the result
+func validateDiagram(diagram string, cmd *cobra.Command) {
+	// Get flags
+	explainFlag, _ := cmd.Flags().GetBool("explain")
+	fixFlag, _ := cmd.Flags().GetBool("fix")
+	verboseFlag, _ := cmd.Flags().GetBool("verbose")
+	retriesFlag, _ := cmd.Flags().GetInt("retries")
+
+	// If retries flag is set, use it to override the environment variable
+	if retriesFlag > 0 {
+		os.Setenv("MERMAID_FIX_RETRIES", strconv.Itoa(retriesFlag))
+		if verboseFlag {
+			fmt.Printf("Setting maximum retries to %d\n", retriesFlag)
+		}
+	}
+
+	// Initialize Claude adapter if we need to fix or explain errors
+	var llmClient pkgllm.Client
+	if explainFlag || fixFlag {
+		claudeAdapter, err := llm.NewClaudeAdapter("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing Claude LLM: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Create a client adapter that bridges LLMAdapter and Client interfaces
+		llmClient = llm.NewClientAdapter(claudeAdapter)
+	}
+
+	// Create validation service
+	validationService := service.NewValidationService(llmClient)
+
+	// Validate the diagram
+	validationResult, validationErr := validationService.ValidateMermaidDiagram(diagram)
+	if validationErr != nil {
+		fmt.Fprintf(os.Stderr, "Error validating diagram: %v\n", validationErr)
+		os.Exit(1)
+	}
+
+	// Format and print the validation result
+	fmt.Println(validationService.FormatValidationResult(validationResult))
+
+	ctx := context.Background()
+
+	// If diagram is invalid and fix flag is set, try to fix it
+	if !validationResult.IsValid && fixFlag {
+		if verboseFlag {
+			fmt.Println("\nAttempting to fix diagram with up to",
+				os.Getenv("MERMAID_FIX_RETRIES"), "retries...")
+		}
+
+		fixedDiagram, fixErr := validationService.FixMermaidDiagramWithLLM(ctx, diagram, validationResult)
+
+		if fixErr != nil {
+			fmt.Fprintf(os.Stderr, "Error fixing diagram: %v\n", fixErr)
+
+			// Check if we have a partially fixed diagram to show
+			if fixedDiagram != "" && fixedDiagram != diagram {
+				fmt.Println("\nPartially fixed diagram (still has errors):")
+				fmt.Println(fixedDiagram)
+			}
+		} else {
+			if verboseFlag {
+				fmt.Println("Successfully fixed diagram!")
+			}
+			fmt.Println("\nFixed diagram:")
+			fmt.Println(fixedDiagram)
+
+			// Re-validate to show the fixed version is valid
+			if verboseFlag {
+				fixedResult, _ := validationService.ValidateMermaidDiagram(fixedDiagram)
+				if fixedResult.IsValid {
+					fmt.Println("Validation confirmed: The fixed diagram is valid.")
+				}
+			}
+		}
+	}
+
+	// If diagram is invalid and explain flag is set, explain the errors
+	if !validationResult.IsValid && explainFlag {
+		explanation, explainErr := validationService.ExplainMermaidDiagramErrors(ctx, validationResult)
+		if explainErr != nil {
+			fmt.Fprintf(os.Stderr, "Error explaining diagram errors: %v\n", explainErr)
+		} else {
+			fmt.Println("\nExplanation of errors:")
+			fmt.Println(explanation)
+		}
+	}
+
+	// Exit with non-zero code if the diagram is invalid
+	if !validationResult.IsValid {
+		os.Exit(1)
+	}
+}
+
+
+//File: ./internal/adapter/llm/claude_adapter.go
+package llm
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/anthropic"
+)
+
+// LLMAdapter defines the interface for LLM interactions
+type LLMAdapter interface {
+	GenerateCompletion(ctx context.Context, prompt string) (string, error)
+}
+
+// claudeAdapter implements LLMAdapter for Claude
+type claudeAdapter struct {
+	model string
+	llm   llms.LLM
+}
+
+// NewClaudeAdapter creates a new Claude adapter
+func NewClaudeAdapter(model string) (LLMAdapter, error) {
+	if model == "" {
+		model = "claude-3-7-sonnet-20250219" // Default to Claude 3.7 Sonnet
+	}
+
+	llm, err := anthropic.New(
+		anthropic.WithModel(model),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Claude: %w", err)
+	}
+
+	return &claudeAdapter{
+		model: model,
+		llm:   llm,
+	}, nil
+}
+
+// GenerateCompletion generates a completion from Claude
+func (a *claudeAdapter) GenerateCompletion(ctx context.Context, prompt string) (string, error) {
+	completion, err := llms.GenerateFromSinglePrompt(ctx, a.llm, prompt)
+	if err != nil {
+		return "", fmt.Errorf("error generating completion: %w", err)
+	}
+
+	return completion, nil
+}
+
+
+//File: ./internal/adapter/llm/client_adapter.go
+package llm
+
+import (
+	"context"
+	pkgllm "mm-go-agent/pkg/llm"
+)
+
+// ClientAdapter is an adapter that implements the pkg/llm.Client interface using the internal LLMAdapter
+type ClientAdapter struct {
+	adapter LLMAdapter
+}
+
+// NewClientAdapter creates a new client adapter
+func NewClientAdapter(adapter LLMAdapter) pkgllm.Client {
+	return &ClientAdapter{
+		adapter: adapter,
+	}
+}
+
+// GenerateText implements the Client.GenerateText method using the underlying LLMAdapter
+func (a *ClientAdapter) GenerateText(ctx context.Context, prompt string) (string, error) {
+	return a.adapter.GenerateCompletion(ctx, prompt)
+}
+
+
+//File: ./internal/adapter/renderer/benchmark_test.go
+package renderer
+
+import (
+	"testing"
+)
+
+var (
+	// Test diagrams used in benchmarks
+	classDiagram = `classDiagram
+class User {
+  +ID string
+  +Name string
+  +Email string
+  +validateEmail()
+}
+class Account {
+  +AccountID string
+  +owner User
+  +Balance float
+  +deposit(amount float)
+  +withdraw(amount float)
+}
+User "1" -- "many" Account : owns`
+
+	sequenceDiagram = `sequenceDiagram
+participant User
+participant API
+participant DB
+User->>API: Request data
+API->>DB: Query information
+DB-->>API: Return results
+API-->>User: Send response
+User->>API: Update record
+API->>DB: Save changes
+DB-->>API: Confirm update
+API-->>User: Success message`
+
+	flowchartDiagram = `flowchart TD
+    A[Start] --> B{Is it?}
+    B -- Yes --> C[OK]
+    C --> D[Rethink]
+    D --> B
+    B -- No ----> E[End]`
+)
+
+// BenchmarkClassDiagram benchmarks rendering a class diagram
+func BenchmarkClassDiagram(b *testing.B) {
+	renderer := NewGoldmarkRenderer()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := renderer.ConvertToSVG(classDiagram)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkSequenceDiagram benchmarks rendering a sequence diagram
+func BenchmarkSequenceDiagram(b *testing.B) {
+	renderer := NewGoldmarkRenderer()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := renderer.ConvertToSVG(sequenceDiagram)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkFlowchartDiagram benchmarks rendering a flowchart diagram
+func BenchmarkFlowchartDiagram(b *testing.B) {
+	renderer := NewGoldmarkRenderer()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := renderer.ConvertToSVG(flowchartDiagram)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkDiagramTypeDetection benchmarks the diagram type detection
+func BenchmarkDiagramTypeDetection(b *testing.B) {
+	renderer := NewGoldmarkRenderer()
+
+	diagrams := []string{classDiagram, sequenceDiagram, flowchartDiagram}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		diagram := diagrams[i%len(diagrams)]
+		diagramType := renderer.detectDiagramType(diagram)
+		if diagramType == "" {
+			b.Fatal("Failed to detect diagram type")
+		}
+	}
+}
+
+// BenchmarkSVGDimensions benchmarks the calculation of SVG dimensions
+func BenchmarkSVGDimensions(b *testing.B) {
+	renderer := NewGoldmarkRenderer()
+	diagrams := []string{"classDiagram", "sequenceDiagram", "flowchart"}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		diagramType := diagrams[i%len(diagrams)]
+		width, height := renderer.getSVGDimensions("sample diagram content", diagramType)
+		if width == 0 || height == 0 {
+			b.Fatal("Invalid dimensions")
+		}
+	}
+}
+
+
+//File: ./internal/adapter/renderer/golden_test.go
+package renderer
+
+import (
+	"flag"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+)
+
+// Update golden files flag
+var updateGolden = flag.Bool("update", false, "update golden files")
+
+// GoldenTestSuite is a test suite for golden file tests
+type GoldenTestSuite struct {
+	suite.Suite
+	renderer *GoldmarkRenderer
+}
+
+// SetupTest initializes the test suite
+func (s *GoldenTestSuite) SetupTest() {
+	s.renderer = NewGoldmarkRenderer()
+}
+
+// readGoldenFile reads the content of a golden file
+func (s *GoldenTestSuite) readGoldenFile(filename string) string {
+	path := filepath.Join("testdata", filename)
+	content, err := os.ReadFile(path)
+	require.NoError(s.T(), err, "Failed to read golden file")
+	return string(content)
+}
+
+// updateGoldenFile updates the content of a golden file
+func (s *GoldenTestSuite) updateGoldenFile(filename, content string) {
+	path := filepath.Join("testdata", filename)
+	err := os.WriteFile(path, []byte(content), 0644)
+	require.NoError(s.T(), err, "Failed to update golden file")
+}
+
+// verifyDiagramWithGolden verifies the diagram against a golden file
+func (s *GoldenTestSuite) verifyDiagramWithGolden(diagramContent, goldenFile string) {
+	// Convert diagram to SVG
+	svg, err := s.renderer.ConvertToSVG(diagramContent)
+	require.NoError(s.T(), err, "Failed to convert diagram to SVG")
+
+	// Update golden file if flag is set
+	svgGoldenFile := goldenFile + ".svg"
+	if *updateGolden {
+		s.updateGoldenFile(svgGoldenFile, svg)
+	}
+
+	// Read expected SVG from golden file
+	expectedSvgPath := filepath.Join("testdata", svgGoldenFile)
+	if _, err := os.Stat(expectedSvgPath); os.IsNotExist(err) {
+		// If file doesn't exist yet, create it
+		s.updateGoldenFile(svgGoldenFile, svg)
+	}
+	expectedSVG := s.readGoldenFile(svgGoldenFile)
+
+	// Verify SVG content
+	assert.Equal(s.T(), expectedSVG, svg, "Generated SVG should match golden file")
+}
+
+// TestClassDiagram tests generating a class diagram against the golden file
+func (s *GoldenTestSuite) TestClassDiagram() {
+	diagram := s.readGoldenFile("golden_class.mmd")
+	s.verifyDiagramWithGolden(diagram, "golden_class.mmd")
+}
+
+// TestSequenceDiagram tests generating a sequence diagram against the golden file
+func (s *GoldenTestSuite) TestSequenceDiagram() {
+	diagram := s.readGoldenFile("golden_sequence.mmd")
+	s.verifyDiagramWithGolden(diagram, "golden_sequence.mmd")
+}
+
+// TestRunGoldenSuite runs the golden test suite
+func TestGoldenSuite(t *testing.T) {
+	// Parse flags to handle update flag
+	flag.Parse()
+
+	suite.Run(t, new(GoldenTestSuite))
+}
+
+
+//File: ./internal/adapter/renderer/goldmark.go
+package renderer
+
+import (
+	"bytes"
+	"fmt"
+	"strings"
+
+	"github.com/yuin/goldmark"
+)
+
+// GoldmarkRenderer is an adapter for rendering Mermaid diagrams to SVG using Goldmark
+type GoldmarkRenderer struct{}
+
+// NewGoldmarkRenderer creates a new instance of GoldmarkRenderer
+func NewGoldmarkRenderer() *GoldmarkRenderer {
+	return &GoldmarkRenderer{}
+}
+
+// ConvertToSVG converts a mermaid diagram to SVG format
+func (r *GoldmarkRenderer) ConvertToSVG(mermaidDiagram string) (string, error) {
+	// Only use goldmark-based rendering
+	return r.tryPureGoldmark(mermaidDiagram)
+}
+
+// tryPureGoldmark attempts to render the Mermaid diagram using pure Goldmark
+func (r *GoldmarkRenderer) tryPureGoldmark(mermaidDiagram string) (string, error) {
+	// Create a markdown document with the Mermaid diagram
+	markdown := "```mermaid\n" + mermaidDiagram + "\n```"
+
+	// Use Goldmark to parse the markdown
+	var buf bytes.Buffer
+	md := goldmark.New(
+		goldmark.WithExtensions(),
+	)
+
+	// Try parsing the markdown
+	if err := md.Convert([]byte(markdown), &buf); err != nil {
+		return "", fmt.Errorf("error converting markdown: %v", err)
+	}
+
+	// Determine the diagram type for proper dimensions
+	diagramType := r.detectDiagramType(mermaidDiagram)
+	width, height := r.getSVGDimensions(mermaidDiagram, diagramType)
+
+	// Create a standard SVG wrapper with the Mermaid diagram
+	svgTemplate := `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d">
+  <style>
+    .mermaid-svg { font-family: sans-serif; }
+  </style>
+  <foreignObject x="0" y="0" width="%d" height="%d">
+    <div xmlns="http://www.w3.org/1999/xhtml">
+      <pre><code class="language-mermaid">%s</code></pre>
+    </div>
+  </foreignObject>
+</svg>`
+
+	return fmt.Sprintf(svgTemplate, width, height, width, height, mermaidDiagram), nil
+}
+
+// detectDiagramType analyzes a Mermaid diagram to determine its type
+func (r *GoldmarkRenderer) detectDiagramType(diagram string) string {
+	// Default diagram type
+	diagramType := "flowchart"
+
+	// Check first non-empty line for diagram type declaration
+	lines := strings.Split(diagram, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "%") {
+			continue
+		}
+
+		// Check for specific diagram types
+		if strings.HasPrefix(trimmed, "classDiagram") {
+			diagramType = "classDiagram"
+			break
+		} else if strings.HasPrefix(trimmed, "sequenceDiagram") {
+			diagramType = "sequenceDiagram"
+			break
+		} else if strings.HasPrefix(trimmed, "flowchart") || strings.HasPrefix(trimmed, "graph") {
+			diagramType = "flowchart"
+			break
+		} else if strings.HasPrefix(trimmed, "erDiagram") {
+			diagramType = "erDiagram"
+			break
+		} else if strings.HasPrefix(trimmed, "stateDiagram") {
+			diagramType = "stateDiagram"
+			break
+		} else if strings.HasPrefix(trimmed, "gantt") {
+			diagramType = "gantt"
+			break
+		} else if strings.HasPrefix(trimmed, "pie") {
+			diagramType = "pie"
+			break
+		}
+
+		// Only check the first non-empty, non-comment line
+		break
+	}
+
+	return diagramType
+}
+
+// getSVGDimensions estimates appropriate SVG dimensions based on diagram content
+func (r *GoldmarkRenderer) getSVGDimensions(diagram, diagramType string) (width, height int) {
+	// Default dimensions
+	width = 800
+	height = 600
+
+	// Count lines and characters to estimate size
+	lines := strings.Split(diagram, "\n")
+	lineCount := 0
+	maxLineLength := 0
+	totalChars := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "%") {
+			continue
+		}
+
+		lineCount++
+		lineLength := len(trimmed)
+		totalChars += lineLength
+
+		if lineLength > maxLineLength {
+			maxLineLength = lineLength
+		}
+	}
+
+	// Adjust dimensions based on content
+	if diagramType == "sequenceDiagram" || diagramType == "gantt" {
+		// These diagrams tend to be wider
+		width = 900
+		height = 500 + (lineCount * 20)
+	} else if diagramType == "classDiagram" || diagramType == "erDiagram" {
+		// These diagrams can be complex
+		width = 1000
+		height = 600 + (lineCount * 15)
+	} else {
+		// Default flowcharts and others
+		width = 800 + (maxLineLength / 2)
+		height = 500 + (lineCount * 15)
+	}
+
+	// Cap dimensions at reasonable values
+	if width > 1500 {
+		width = 1500
+	}
+	if height > 2000 {
+		height = 2000
+	}
+
+	return width, height
+}
+
+
+//File: ./internal/adapter/renderer/integration_test.go
+package renderer
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+)
+
+// IntegrationTestSuite is a test suite for integration tests
+type IntegrationTestSuite struct {
+	suite.Suite
+	renderer *GoldmarkRenderer
+	tempDir  string
+}
+
+// SetupSuite sets up the test suite
+func (s *IntegrationTestSuite) SetupSuite() {
+	s.renderer = NewGoldmarkRenderer()
+
+	// Create a temporary directory for output files
+	tempDir, err := os.MkdirTemp("", "mermaid-integration-test")
+	require.NoError(s.T(), err, "Failed to create temp directory")
+	s.tempDir = tempDir
+}
+
+// TearDownSuite tears down the test suite
+func (s *IntegrationTestSuite) TearDownSuite() {
+	// Clean up the temporary directory
+	os.RemoveAll(s.tempDir)
+}
+
+// TestEndToEndDiagramRendering tests the entire diagram rendering pipeline
+func (s *IntegrationTestSuite) TestEndToEndDiagramRendering() {
+	testCases := []struct {
+		name          string
+		diagram       string
+		expectedType  string
+		expectedWidth int
+		minSVGLength  int
+	}{
+		{
+			name: "Class Diagram",
+			diagram: `classDiagram
+class User {
+  +ID string
+  +Name string
+}
+class Account {
+  +AccountID string
+  +owner User
+}
+User "1" -- "many" Account : owns`,
+			expectedType:  "classDiagram",
+			expectedWidth: 1000,
+			minSVGLength:  300,
+		},
+		{
+			name: "Sequence Diagram",
+			diagram: `sequenceDiagram
+participant A
+participant B
+A->>B: Hello
+B-->>A: Hi there!`,
+			expectedType:  "sequenceDiagram",
+			expectedWidth: 900,
+			minSVGLength:  300,
+		},
+		{
+			name: "Flowchart",
+			diagram: `flowchart TD
+A[Start] --> B[End]`,
+			expectedType:  "flowchart",
+			expectedWidth: 809,
+			minSVGLength:  200,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.name, func() {
+			// Test diagram type detection
+			diagramType := s.renderer.detectDiagramType(tc.diagram)
+			assert.Equal(s.T(), tc.expectedType, diagramType, "Diagram type should match")
+
+			// Test dimension calculation
+			width, height := s.renderer.getSVGDimensions(tc.diagram, diagramType)
+			assert.Equal(s.T(), tc.expectedWidth, width, "Width should match expected value")
+			assert.Greater(s.T(), height, 0, "Height should be positive")
+
+			// Test full SVG conversion
+			svg, err := s.renderer.ConvertToSVG(tc.diagram)
+			require.NoError(s.T(), err, "SVG conversion should succeed")
+			assert.Contains(s.T(), svg, "<svg", "Output should contain SVG tag")
+			assert.Contains(s.T(), svg, tc.diagram, "Output should contain original diagram")
+			assert.Greater(s.T(), len(svg), tc.minSVGLength, "SVG should have minimum length")
+
+			// Test writing to file
+			outputPath := filepath.Join(s.tempDir, strings.ReplaceAll(tc.name, " ", "_")+".svg")
+			err = os.WriteFile(outputPath, []byte(svg), 0644)
+			require.NoError(s.T(), err, "Writing SVG to file should succeed")
+
+			// Verify file was written
+			fileContent, err := os.ReadFile(outputPath)
+			require.NoError(s.T(), err, "Reading SVG file should succeed")
+			assert.Equal(s.T(), svg, string(fileContent), "File content should match SVG")
+		})
+	}
+}
+
+// TestRunIntegrationSuite runs the integration test suite
+func TestIntegrationSuite(t *testing.T) {
+	suite.Run(t, new(IntegrationTestSuite))
+}
+
+
+//File: ./internal/adapter/renderer/mermaid_renderer.go
+package renderer
+
+import (
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+// MermaidRenderer implements a renderer that converts Mermaid to actual SVG
+// by using the Mermaid.ink API service
+type MermaidRenderer struct {
+	client     *http.Client
+	serviceURL string
+}
+
+// MermaidRequest represents the request body for the Mermaid rendering API
+type MermaidRequest struct {
+	Code string `json:"code"`
+}
+
+// NewMermaidRenderer creates a new instance of MermaidRenderer
+func NewMermaidRenderer() *MermaidRenderer {
+	return &MermaidRenderer{
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		// This is the correct endpoint for raw SVG rendering
+		serviceURL: "https://mermaid.ink/img/svg",
+	}
+}
+
+// ConvertToSVG converts a mermaid diagram to actual SVG format using the Mermaid.ink API
+func (r *MermaidRenderer) ConvertToSVG(mermaidDiagram string) (string, error) {
+	// Encode the Mermaid diagram to base64
+	encodedDiagram := base64.URLEncoding.EncodeToString([]byte(mermaidDiagram))
+
+	// Construct the URL with the encoded diagram
+	url := fmt.Sprintf("%s/%s", r.serviceURL, encodedDiagram)
+
+	// Create HTTP request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+	req.Header.Set("Accept", "image/svg+xml")
+
+	// Send the request
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check for errors
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+	}
+
+	// Read response body (SVG content)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response: %v", err)
+	}
+
+	return string(body), nil
+}
+
+
+//File: ./internal/adapter/renderer/mermaid_renderer_test.go
+package renderer
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+)
+
+// MermaidRendererTestSuite is a test suite for testing the MermaidRenderer
+type MermaidRendererTestSuite struct {
+	suite.Suite
+	renderer    *MermaidRenderer
+	fallback    *GoldmarkRenderer
+	svgRenderer *SVGRenderer
+}
+
+// SetupTest sets up the test suite
+func (s *MermaidRendererTestSuite) SetupTest() {
+	s.renderer = NewMermaidRenderer()
+	s.fallback = NewGoldmarkRenderer()
+	s.svgRenderer = NewSVGRenderer(s.renderer, s.fallback)
+}
+
+// Test that we're generating actual SVG elements, not just embedding Mermaid in an SVG wrapper
+func (s *MermaidRendererTestSuite) TestActualSVGRendering() {
+	// Simple flowchart diagram
+	diagram := `graph TD;
+    A-->B;
+    A-->C;
+    B-->D;
+    C-->D;`
+
+	// Convert to SVG using MermaidRenderer
+	svg, err := s.renderer.ConvertToSVG(diagram)
+
+	// We should get a result, but if the API is down, this might fail
+	// In that case, we'll skip rather than fail the test
+	if err != nil {
+		s.T().Skip("Skipping test due to API error:", err)
+		return
+	}
+
+	// Verify that we have actual SVG elements
+	s.assertSVGContainsActualElements(svg)
+}
+
+// Test the fallback mechanism
+func (s *MermaidRendererTestSuite) TestFallbackRendering() {
+	// Temporarily break the API URL to force fallback
+	s.renderer.serviceURL = "https://invalid-url-that-doesnt-exist.example"
+
+	// Simple flowchart diagram
+	diagram := `graph TD;
+    A-->B;
+    A-->C;
+    B-->D;
+    C-->D;`
+
+	// Convert using the SVGRenderer which should fall back to Goldmark
+	svg, err := s.svgRenderer.ConvertToSVG(diagram)
+	require.NoError(s.T(), err, "SVG rendering with fallback should succeed")
+
+	// Verify that we have the fallback SVG format (should contain foreignObject)
+	assert.Contains(s.T(), svg, "<foreignObject", "Fallback SVG should use foreignObject")
+	assert.Contains(s.T(), svg, "class=\"language-mermaid\"", "Fallback SVG should contain Mermaid code")
+}
+
+// Helper function to assert that an SVG contains actual SVG elements, not just embedded Mermaid
+func (s *MermaidRendererTestSuite) assertSVGContainsActualElements(svg string) {
+	// Convert to lowercase for case-insensitive checks
+	svgLower := strings.ToLower(svg)
+
+	// Check that this is a valid SVG
+	assert.True(s.T(), strings.HasPrefix(svgLower, "<svg"), "Should start with SVG tag")
+
+	// Check for actual SVG elements that would indicate proper rendering
+	// In a proper SVG rendering, we'd expect elements like path, g, rect, etc.
+	elementCount := 0
+	for _, element := range []string{"<path", "<g ", "<rect", "<polygon", "<ellipse"} {
+		if strings.Contains(svgLower, element) {
+			elementCount++
+		}
+	}
+
+	// We should have at least some SVG elements
+	assert.True(s.T(), elementCount > 0, "SVG should contain actual SVG elements like path, g, rect, etc.")
+
+	// Should NOT contain the mermaid class marker that would indicate embedded code
+	assert.NotContains(s.T(), svgLower, "class=\"language-mermaid\"",
+		"Properly rendered SVG should not contain embedded Mermaid code")
+
+	// Should NOT use foreignObject which would indicate embedding
+	assert.NotContains(s.T(), svgLower, "<foreignobject",
+		"Properly rendered SVG should not use foreignObject")
+}
+
+// TestCompareRenderers compares the output of both renderers
+func (s *MermaidRendererTestSuite) TestCompareRenderers() {
+	// Skip this test if the Mermaid API is down
+	diagram := `graph TD;
+    A-->B;`
+
+	// Test with MermaidRenderer first to see if it's available
+	_, err := s.renderer.ConvertToSVG(diagram)
+	if err != nil {
+		s.T().Skip("Skipping comparison test due to Mermaid API error:", err)
+		return
+	}
+
+	// More complex diagram for comparison
+	complexDiagram := `sequenceDiagram
+    participant User
+    participant App
+    User->>App: Request data
+    App-->>User: Respond with data`
+
+	// Get results from both renderers
+	mermaidSVG, err := s.renderer.ConvertToSVG(complexDiagram)
+	require.NoError(s.T(), err, "MermaidRenderer should succeed")
+
+	goldmarkSVG, err := s.fallback.ConvertToSVG(complexDiagram)
+	require.NoError(s.T(), err, "GoldmarkRenderer should succeed")
+
+	// Verify that the MermaidRenderer output has actual SVG elements
+	s.assertSVGContainsActualElements(mermaidSVG)
+
+	// Verify that the two outputs are different
+	assert.NotEqual(s.T(), mermaidSVG, goldmarkSVG,
+		"The two renderer outputs should be different since one generates real SVG elements")
+
+	// The goldmark SVG should contain the original Mermaid code
+	assert.Contains(s.T(), goldmarkSVG, complexDiagram,
+		"GoldmarkRenderer SVG should contain the original Mermaid code")
+}
+
+// TestRunMermaidRendererSuite runs the MermaidRenderer test suite
+func TestMermaidRendererSuite(t *testing.T) {
+	suite.Run(t, new(MermaidRendererTestSuite))
+}
+
+
+//File: ./internal/adapter/renderer/node_mermaid_renderer.go
+package renderer
+
+import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path/filepath"
+)
+
+// NodeMermaidRenderer implements a renderer that uses Node.js with mermaid-cli
+// for local rendering of Mermaid diagrams to SVG
+type NodeMermaidRenderer struct {
+	nodePath   string
+	mermaidCLI string
+	tempDir    string
+}
+
+// NewNodeMermaidRenderer creates a new instance of NodeMermaidRenderer
+// It requires Node.js to be installed and available in PATH
+func NewNodeMermaidRenderer() *NodeMermaidRenderer {
+	// Default to system's temp directory
+	tempDir := os.TempDir()
+
+	return &NodeMermaidRenderer{
+		nodePath:   "node",                        // assume node is in PATH
+		mermaidCLI: "npx @mermaid-js/mermaid-cli", // use npx to run mermaid-cli
+		tempDir:    tempDir,
+	}
+}
+
+// ConvertToSVG converts a mermaid diagram to SVG format using mermaid-cli via Node.js
+func (r *NodeMermaidRenderer) ConvertToSVG(mermaidDiagram string) (string, error) {
+	// Create temporary files for input and output
+	tempInputFile, err := r.createTempFile("mermaid-input-*.mmd", mermaidDiagram)
+	if err != nil {
+		return "", fmt.Errorf("error creating temporary input file: %v", err)
+	}
+	defer os.Remove(tempInputFile) // Clean up input file when done
+
+	// Create a temporary output file name
+	tempOutputFile := filepath.Join(r.tempDir, fmt.Sprintf("mermaid-output-%d.svg", os.Getpid()))
+	defer os.Remove(tempOutputFile) // Clean up output file when done
+
+	// Build the command to run mermaid-cli
+	cmd := fmt.Sprintf("%s %s -i %s -o %s -b transparent",
+		r.nodePath, r.mermaidCLI, tempInputFile, tempOutputFile)
+
+	// Execute the command
+	command := exec.Command("sh", "-c", cmd)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("error executing mermaid-cli: %v\nOutput: %s", err, output)
+	}
+
+	// Read the generated SVG file
+	svgContent, err := ioutil.ReadFile(tempOutputFile)
+	if err != nil {
+		return "", fmt.Errorf("error reading output SVG file: %v", err)
+	}
+
+	return string(svgContent), nil
+}
+
+// createTempFile creates a temporary file with the given pattern and content
+func (r *NodeMermaidRenderer) createTempFile(pattern, content string) (string, error) {
+	// Create temporary file
+	tempFile, err := ioutil.TempFile(r.tempDir, pattern)
+	if err != nil {
+		return "", err
+	}
+
+	// Write content to file
+	_, err = tempFile.WriteString(content)
+	if err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return "", err
+	}
+
+	// Close the file
+	if err = tempFile.Close(); err != nil {
+		os.Remove(tempFile.Name())
+		return "", err
+	}
+
+	return tempFile.Name(), nil
+}
+
+// IsAvailable checks if Node.js and mermaid-cli are available
+func (r *NodeMermaidRenderer) IsAvailable() bool {
+	// Check if Node.js is installed
+	nodeCmd := exec.Command("which", "node")
+	if err := nodeCmd.Run(); err != nil {
+		return false
+	}
+
+	// Try to run npx with --version to see if it's available
+	npxCmd := exec.Command("which", "npx")
+	if err := npxCmd.Run(); err != nil {
+		return false
+	}
+
+	return true
+}
+
+
+//File: ./internal/adapter/renderer/renderer.go
+package renderer
+
+// Renderer defines the interface for Mermaid-to-SVG renderers
+type Renderer interface {
+	// ConvertToSVG converts a Mermaid diagram to SVG format
+	ConvertToSVG(mermaidDiagram string) (string, error)
+}
+
+
+//File: ./internal/adapter/renderer/svg_renderer.go
+package renderer
+
+import (
+	"fmt"
+	"strings"
+)
+
+// SVGRenderer combines different rendering strategies with fallback options
+type SVGRenderer struct {
+	renderers []Renderer
+}
+
+// NewSVGRenderer creates a new SVG renderer with a list of renderers in order of preference
+func NewSVGRenderer(renderers ...Renderer) *SVGRenderer {
+	return &SVGRenderer{
+		renderers: renderers,
+	}
+}
+
+// DefaultSVGRenderer creates a new SVG renderer with standard renderers in order of preference:
+// 1. MermaidRenderer (API-based) - best quality but requires internet
+// 2. NodeMermaidRenderer (Node.js based) - good quality, requires Node.js
+// 3. GoldmarkRenderer (pure Go) - fallback that works everywhere but doesn't render actual SVG
+func DefaultSVGRenderer() *SVGRenderer {
+	renderers := []Renderer{
+		NewMermaidRenderer(),
+		NewGoldmarkRenderer(),
+	}
+
+	// Try to add the Node renderer if available
+	nodeRenderer := NewNodeMermaidRenderer()
+	if nodeRenderer.IsAvailable() {
+		// Insert Node renderer as second option (after API, before Goldmark)
+		renderers = append([]Renderer{renderers[0], nodeRenderer}, renderers[1:]...)
+	}
+
+	return &SVGRenderer{
+		renderers: renderers,
+	}
+}
+
+// ConvertToSVG converts a mermaid diagram to SVG format using available renderers
+// It tries each renderer in sequence until one succeeds
+func (r *SVGRenderer) ConvertToSVG(mermaidDiagram string) (string, error) {
+	var errors []string
+
+	// Try each renderer in sequence
+	for i, renderer := range r.renderers {
+		svg, err := renderer.ConvertToSVG(mermaidDiagram)
+		if err == nil {
+			return svg, nil
+		}
+
+		// Keep track of errors
+		errors = append(errors, fmt.Sprintf("renderer #%d failed: %v", i+1, err))
+	}
+
+	// If we get here, all renderers failed
+	return "", fmt.Errorf("all renderers failed: %s", strings.Join(errors, "; "))
+}
+
+
+//File: ./internal/repository/file/output.go
+package file
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// OutputRepository handles file output operations
+type OutputRepository struct{}
+
+// NewOutputRepository creates a new file output repository
+func NewOutputRepository() *OutputRepository {
+	return &OutputRepository{}
+}
+
+// SaveDiagramFiles saves both MMD and SVG diagram files
+func (r *OutputRepository) SaveDiagramFiles(outDir, filename, mmdContent, svgContent string) error {
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("error creating output directory: %v", err)
+	}
+
+	// Save the MMD file
+	mmdOutputPath := filepath.Join(outDir, filename+".mmd")
+	if err := os.WriteFile(mmdOutputPath, []byte(mmdContent), 0644); err != nil {
+		return fmt.Errorf("error writing MMD file: %v", err)
+	}
+	fmt.Printf("Original diagram saved to %s\n", mmdOutputPath)
+
+	// If SVG content is provided, save it as well
+	if svgContent != "" {
+		svgOutputPath := filepath.Join(outDir, filename+".svg")
+		if err := os.WriteFile(svgOutputPath, []byte(svgContent), 0644); err != nil {
+			return fmt.Errorf("error writing SVG file: %v", err)
+		}
+		fmt.Printf("SVG diagram saved to %s\n", svgOutputPath)
+	}
+
+	return nil
+}
+
+// SaveDiagramFile saves a single diagram file with the specified content and extension
+func (r *OutputRepository) SaveDiagramFile(outDir, filename, content, extension string) error {
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("error creating output directory: %v", err)
+	}
+
+	// Create the full output path
+	outputPath := filepath.Join(outDir, filename+"."+extension)
+
+	// Write the file
+	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("error writing file: %v", err)
+	}
+
+	fmt.Printf("Diagram saved to %s\n", outputPath)
+	return nil
+}
+
+
+//File: ./internal/repository/file_repository.go
+package repository
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// FileRepository defines the interface for file operations
+type FileRepository interface {
+	ReadGoFile(path string) (string, error)
+	ValidateGoFile(path string) error
+	FindComponentFiles(componentType, componentName string) ([]string, error)
+	FindAllComponentFiles(componentTypes []string) ([]string, error)
+}
+
+// fileRepository implements FileRepository
+type fileRepository struct{}
+
+// NewFileRepository creates a new file repository
+func NewFileRepository() FileRepository {
+	return &fileRepository{}
+}
+
+// ValidateGoFile checks if a file exists and has a .go extension
+func (r *fileRepository) ValidateGoFile(path string) error {
+	if filepath.Ext(path) != ".go" {
+		return fmt.Errorf("file must be a Go file (.go extension)")
+	}
+
+	_, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("error accessing file: %w", err)
+	}
+
+	return nil
+}
+
+// ReadGoFile reads the content of a go file
+func (r *fileRepository) ReadGoFile(path string) (string, error) {
+	if err := r.ValidateGoFile(path); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("error reading file: %w", err)
+	}
+
+	return string(content), nil
+}
+
+// FindComponentFiles finds all Go files for a specific component
+func (r *fileRepository) FindComponentFiles(componentType, componentName string) ([]string, error) {
+	var basePath string
+
+	// Determine the base path for the component type
+	switch componentType {
+	case "service":
+		basePath = "internal/services"
+	case "repository":
+		basePath = "internal/repositories"
+	case "adapter":
+		basePath = "internal/adapters"
+	case "config":
+		basePath = "internal/config"
+	case "model":
+		basePath = "internal/model"
+	default:
+		return nil, fmt.Errorf("unsupported component type: %s", componentType)
+	}
+
+	// Create search pattern for the component name
+	namePattern := strings.ToLower(componentName)
+
+	var files []string
+	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			// Special handling for adapters which are typically organized in subdirectories
+			if componentType == "adapter" && strings.HasSuffix(path, namePattern) {
+				return nil // Continue descending into matching adapter directories
+			}
+
+			// Skip non-matching directories for other component types
+			if filepath.Dir(path) != basePath && path != basePath {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Check if the file matches the component name
+		fileName := strings.ToLower(info.Name())
+		if filepath.Ext(fileName) == ".go" &&
+			(strings.Contains(fileName, namePattern) ||
+				strings.Contains(fileName, strings.ToLower(componentType))) {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("error walking directory %s: %w", basePath, err)
+	}
+
+	return files, nil
+}
+
+// FindAllComponentFiles finds all Go files for the specified component types
+func (r *fileRepository) FindAllComponentFiles(componentTypes []string) ([]string, error) {
+	var allFiles []string
+
+	for _, componentType := range componentTypes {
+		var basePath string
+
+		// Determine the base path for the component type
+		switch componentType {
+		case "service":
+			basePath = "internal/services"
+		case "repository":
+			basePath = "internal/repositories"
+		case "adapter":
+			basePath = "internal/adapters"
+		case "config":
+			basePath = "internal/config"
+		case "model":
+			basePath = "internal/models"
+		default:
+			continue // Skip unsupported component types
+		}
+
+		// Check if the directory exists
+		if _, err := os.Stat(basePath); os.IsNotExist(err) {
+			continue // Skip non-existent directories
+		}
+
+		// Find all Go files in the directory
+		err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !info.IsDir() && filepath.Ext(path) == ".go" {
+				allFiles = append(allFiles, path)
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("error walking directory %s: %w", basePath, err)
+		}
+	}
+
+	return allFiles, nil
+}
+
+
+//File: ./internal/service/diagram/processor.go
+package diagram
+
+import (
+	"strings"
+)
+
+// Processor handles diagram content processing and cleanup
+type Processor struct{}
+
+// NewProcessor creates a new diagram processor
+func NewProcessor() *Processor {
+	return &Processor{}
+}
+
+// CleanDiagramOutput processes the diagram output to fix formatting issues
+func (p *Processor) CleanDiagramOutput(diagram string) string {
+	// Remove outer classDiagram wrapper if there are nested diagrams
+	lines := strings.Split(diagram, "\n")
+
+	// Check if we have nested mermaid diagrams with ```mermaid markers
+	if strings.Contains(diagram, "```mermaid") {
+		var result strings.Builder
+
+		// Extract and merge all mermaid code blocks
+		inMermaidBlock := false
+		firstDiagramType := ""
+
+		for _, line := range lines {
+			// Skip lines with percentage comments
+			if strings.HasPrefix(strings.TrimSpace(line), "%") {
+				continue
+			}
+
+			if strings.Contains(line, "```mermaid") {
+				inMermaidBlock = true
+				continue
+			} else if strings.HasPrefix(line, "```") && inMermaidBlock {
+				inMermaidBlock = false
+				result.WriteString("\n")
+				continue
+			}
+
+			if inMermaidBlock {
+				// Capture the first diagram type we encounter
+				if firstDiagramType == "" && (strings.HasPrefix(strings.TrimSpace(line), "classDiagram") ||
+					strings.HasPrefix(strings.TrimSpace(line), "sequenceDiagram") ||
+					strings.HasPrefix(strings.TrimSpace(line), "flowchart") ||
+					strings.HasPrefix(strings.TrimSpace(line), "graph")) {
+					firstDiagramType = strings.TrimSpace(line)
+				}
+
+				// Don't add duplicate diagram type declarations
+				if strings.TrimSpace(line) != firstDiagramType || firstDiagramType == "" {
+					result.WriteString(line)
+					result.WriteString("\n")
+				}
+			}
+		}
+
+		// Ensure we have the diagram type at the beginning
+		if firstDiagramType != "" {
+			return firstDiagramType + "\n" + result.String()
+		}
+
+		return result.String()
+	}
+
+	// No nested diagrams, just clean up any percentage comments
+	var result strings.Builder
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "%") {
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(result.String())
+}
+
+// ExtractComponentSections extracts different component sections from a project map diagram
+func (p *Processor) ExtractComponentSections(diagram string) map[string]string {
+	sections := make(map[string]string)
+
+	lines := strings.Split(diagram, "\n")
+	currentComponent := ""
+	var currentContent strings.Builder
+
+	// Look for section markers like "% MODEL components" or "% SERVICE components"
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Check if this is a component section marker
+		if strings.HasPrefix(trimmedLine, "%") && strings.Contains(strings.ToLower(trimmedLine), "component") {
+			// If we were already in a component section, save it
+			if currentComponent != "" && currentContent.Len() > 0 {
+				sections[currentComponent] = currentContent.String()
+				currentContent.Reset()
+			}
+
+			// Extract the component name from the marker
+			parts := strings.Fields(trimmedLine)
+			if len(parts) >= 2 {
+				currentComponent = strings.ToLower(strings.TrimSuffix(parts[1], "s"))
+			}
+
+			continue
+		}
+
+		// If we're in a component section, add this line to the content
+		if currentComponent != "" {
+			currentContent.WriteString(line)
+			currentContent.WriteString("\n")
+		}
+	}
+
+	// Save the last component section if there is one
+	if currentComponent != "" && currentContent.Len() > 0 {
+		sections[currentComponent] = currentContent.String()
+	}
+
+	return sections
+}
+
+
+//File: ./internal/service/diagram/service.go
+package diagram
+
+import (
+	"fmt"
+	"path/filepath"
+
+	"mm-go-agent/internal/adapter/renderer"
+	fileOutputRepo "mm-go-agent/internal/repository/file"
+)
+
+// OutputService coordinates diagram processing and output
+type OutputService struct {
+	processor *Processor
+	renderer  renderer.Renderer
+	fileRepo  *fileOutputRepo.OutputRepository
+}
+
+// NewOutputService creates a new diagram output service
+func NewOutputService(processor *Processor, renderer renderer.Renderer, fileRepo *fileOutputRepo.OutputRepository) *OutputService {
+	return &OutputService{
+		processor: processor,
+		renderer:  renderer,
+		fileRepo:  fileRepo,
+	}
+}
+
+// GenerateAndSaveDiagram generates a diagram and saves it to the specified output directory
+func (s *OutputService) GenerateAndSaveDiagram(diagramType, filePath, target, outDir string, svgFormat bool) error {
+	// If outDir is not specified, just return
+	if outDir == "" {
+		return nil
+	}
+
+	// Create filename based on diagram type and target
+	var filename string
+	if filePath != "" {
+		baseName := filepath.Base(filePath)
+		filename = fmt.Sprintf("%s_%s", baseName, diagramType)
+	} else if target == "map" {
+		filename = fmt.Sprintf("project_%s", diagramType)
+	} else {
+		filename = fmt.Sprintf("component_%s", diagramType)
+	}
+
+	return s.SaveDiagram(filename, outDir, filePath, svgFormat)
+}
+
+// SaveDiagram saves a diagram to the specified output directory
+func (s *OutputService) SaveDiagram(filename, outDir, content string, svgFormat bool) error {
+	// Clean the diagram content
+	cleanedContent := s.processor.CleanDiagramOutput(content)
+
+	// If SVG format is requested, convert the diagram
+	if svgFormat {
+		svgContent, err := s.renderer.ConvertToSVG(cleanedContent)
+		if err != nil {
+			return fmt.Errorf("error converting to SVG: %v", err)
+		}
+
+		// Save both MMD and SVG files
+		return s.fileRepo.SaveDiagramFiles(outDir, filename, cleanedContent, svgContent)
+	}
+
+	// Otherwise, just save the MMD file
+	return s.fileRepo.SaveDiagramFile(outDir, filename, cleanedContent, "mmd")
+}
+
+// SaveSplitDiagram splits a project map diagram into component sections and saves them
+func (s *OutputService) SaveSplitDiagram(diagram, diagramType, outDir string, svgFormat bool) error {
+	// Extract component sections from the diagram
+	componentSections := s.processor.ExtractComponentSections(diagram)
+
+	// If no sections were found, save the whole diagram
+	if len(componentSections) == 0 {
+		cleanedDiagram := s.processor.CleanDiagramOutput(diagram)
+		filename := fmt.Sprintf("project_%s", diagramType)
+
+		if svgFormat {
+			svgDiagram, err := s.renderer.ConvertToSVG(cleanedDiagram)
+			if err != nil {
+				return fmt.Errorf("error converting to SVG: %v", err)
+			}
+			return s.fileRepo.SaveDiagramFiles(outDir, filename, cleanedDiagram, svgDiagram)
+		}
+
+		return s.fileRepo.SaveDiagramFile(outDir, filename, cleanedDiagram, "mmd")
+	}
+
+	// Save each component section to its own file
+	for component, content := range componentSections {
+		cleanedContent := s.processor.CleanDiagramOutput(content)
+		filename := fmt.Sprintf("%s_%s", component, diagramType)
+
+		if svgFormat {
+			svgContent, err := s.renderer.ConvertToSVG(cleanedContent)
+			if err != nil {
+				fmt.Printf("Warning: Error converting %s to SVG: %v\n", component, err)
+				// Continue with other components
+				continue
+			}
+			if err := s.fileRepo.SaveDiagramFiles(outDir, filename, cleanedContent, svgContent); err != nil {
+				fmt.Printf("Warning: Error saving %s: %v\n", component, err)
+			}
+		} else {
+			if err := s.fileRepo.SaveDiagramFile(outDir, filename, cleanedContent, "mmd"); err != nil {
+				fmt.Printf("Warning: Error saving %s: %v\n", component, err)
+			}
+		}
+	}
+
+	// Also save a full combined diagram
+	cleanedFullDiagram := s.processor.CleanDiagramOutput(diagram)
+	fullFilename := fmt.Sprintf("project_%s_full", diagramType)
+
+	if svgFormat {
+		svgDiagram, err := s.renderer.ConvertToSVG(cleanedFullDiagram)
+		if err != nil {
+			fmt.Printf("Warning: Could not convert combined diagram to SVG: %v\n", err)
+			// Still save the MMD version
+			return s.fileRepo.SaveDiagramFile(outDir, fullFilename, cleanedFullDiagram, "mmd")
+		}
+		return s.fileRepo.SaveDiagramFiles(outDir, fullFilename, cleanedFullDiagram, svgDiagram)
+	}
+
+	return s.fileRepo.SaveDiagramFile(outDir, fullFilename, cleanedFullDiagram, "mmd")
+}
+
+
+//File: ./internal/service/diagram_service.go
+package service
+
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"mm-go-agent/internal/adapter/llm"
+	"mm-go-agent/internal/repository"
+	"mm-go-agent/pkg/mermaid"
+	"mm-go-agent/pkg/prompt"
+)
+
+// DiagramService handles the generation of Mermaid diagrams
+type DiagramService interface {
+	GenerateDiagram(ctx context.Context, filePath string, diagramType string) (string, error)
+	GenerateComponentDiagram(ctx context.Context, componentSpec string, diagramType string) (string, error)
+	GenerateProjectDiagram(ctx context.Context, diagramType string) (string, error)
+}
+
+// diagramService implements DiagramService
+type diagramService struct {
+	fileRepo   repository.FileRepository
+	llmAdapter llm.LLMAdapter
+	promptMgr  *prompt.TemplateManager
+}
+
+// NewDiagramService creates a new diagram service
+func NewDiagramService(fileRepo repository.FileRepository, llmAdapter llm.LLMAdapter) DiagramService {
+	promptMgr, err := prompt.New()
+	if err != nil {
+		// Fall back to empty manager if templates can't be loaded
+		promptMgr = &prompt.TemplateManager{}
+	}
+
+	return &diagramService{
+		fileRepo:   fileRepo,
+		llmAdapter: llmAdapter,
+		promptMgr:  promptMgr,
+	}
+}
+
+// GenerateDiagram generates a Mermaid diagram from Go code in the specified file
+func (s *diagramService) GenerateDiagram(ctx context.Context, filePath string, diagramType string) (string, error) {
+	// Read the file content
+	codeContent, err := s.fileRepo.ReadGoFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Go file: %w", err)
+	}
+
+	// Map the diagram type string to a DiagramType
+	dt := s.mapDiagramType(diagramType)
+
+	// Generate the prompt for the diagram
+	var promptText string
+	if s.promptMgr != nil {
+		// Use the template manager if available
+		promptText, err = s.promptMgr.GetDiagramPrompt(codeContent, dt)
+		if err != nil {
+			// Fall back to old method if template fails
+			promptText = mermaid.CreatePrompt(codeContent, dt)
+		}
+	} else {
+		// Use the old method if template manager is not available
+		promptText = mermaid.CreatePrompt(codeContent, dt)
+	}
+
+	// Generate the diagram using the LLM
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
+	if err != nil {
+		return "", fmt.Errorf("error generating diagram: %w", err)
+	}
+
+	// Format the output
+	return mermaid.FormatOutput(diagramText), nil
+}
+
+// GenerateComponentDiagram generates a Mermaid diagram for a specific component (service, repository, etc.)
+func (s *diagramService) GenerateComponentDiagram(ctx context.Context, componentSpec string, diagramType string) (string, error) {
+	// Parse component type and name
+	parts := strings.Split(componentSpec, ":")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid component specification: %s (should be 'type:name')", componentSpec)
+	}
+
+	componentType := parts[0]
+	componentName := parts[1]
+
+	// Get component files
+	files, err := s.fileRepo.FindComponentFiles(componentType, componentName)
+	if err != nil {
+		return "", fmt.Errorf("failed to find %s %s files: %w", componentType, componentName, err)
+	}
+
+	if len(files) == 0 {
+		return "", fmt.Errorf("no files found for %s %s", componentType, componentName)
+	}
+
+	// Read all files content
+	var codeContents []string
+	for _, file := range files {
+		content, err := s.fileRepo.ReadGoFile(file)
+		if err != nil {
+			return "", fmt.Errorf("failed to read file %s: %w", file, err)
+		}
+		codeContents = append(codeContents, content)
+	}
+
+	// Join all code contents
+	allCode := strings.Join(codeContents, "\n\n")
+
+	// Create prompt for component
+	promptText := fmt.Sprintf("Please create a %s Mermaid diagram for the %s '%s' from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.",
+		diagramType, componentType, componentName, allCode)
+
+	// Generate diagram using LLM
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate diagram: %w", err)
+	}
+
+	return mermaid.FormatOutput(diagramText), nil
+}
+
+// GenerateProjectDiagram generates project-wide Mermaid diagrams
+func (s *diagramService) GenerateProjectDiagram(ctx context.Context, diagramType string) (string, error) {
+	// Validate diagram type
+	if !isValidProjectDiagramType(diagramType) {
+		return "", fmt.Errorf("invalid project diagram type: %s (should be 'sequence', 'class', 'config', or 'adapters')", diagramType)
+	}
+
+	// Find all relevant files based on diagram type
+	var files []string
+	var err error
+
+	// Special handling for class diagrams to process each component type separately
+	if diagramType == "class" {
+		return s.generateConcurrentClassDiagram(ctx)
+	}
+
+	switch diagramType {
+	case "sequence":
+		// Get service, repository, and adapter files for sequence diagram
+		files, err = s.fileRepo.FindAllComponentFiles([]string{"service", "repository", "adapter"})
+	case "config":
+		// Get only config files
+		files, err = s.fileRepo.FindAllComponentFiles([]string{"config"})
+	case "adapters":
+		// Get adapter files
+		files, err = s.fileRepo.FindAllComponentFiles([]string{"adapter"})
+	default:
+		// Fallback to all files
+		files, err = s.fileRepo.FindAllComponentFiles([]string{"service", "repository", "adapter", "model", "config"})
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to find files: %w", err)
+	}
+
+	if len(files) == 0 {
+		return "", fmt.Errorf("no relevant files found for diagram type: %s", diagramType)
+	}
+
+	// Read all files content
+	var codeContents []string
+	for _, file := range files {
+		content, err := s.fileRepo.ReadGoFile(file)
+		if err != nil {
+			return "", fmt.Errorf("failed to read file %s: %w", file, err)
+		}
+		codeContents = append(codeContents, fmt.Sprintf("// File: %s\n%s", filepath.Base(file), content))
+	}
+
+	// Join all code contents
+	allCode := strings.Join(codeContents, "\n\n")
+
+	// Create prompt for project diagram
+	var promptText string
+	switch diagramType {
+	case "sequence":
+		promptText = fmt.Sprintf("Please create a sequence diagram showing the interactions between all components (services, repositories, adapters) in this Go project. Focus on the flow of calls between different components and how they interact:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+	case "config":
+		promptText = fmt.Sprintf("Please create a diagram showing how configuration is structured and accessed throughout the application. Show config structs and how other components interact with them:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+	case "adapters":
+		promptText = fmt.Sprintf("Please create a diagram showing all inbound and outbound communications in the application. Focus on adapter components and how they interact with external systems and internal components:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+	default:
+		promptText = fmt.Sprintf("Please create a diagram showing the overall architecture of this Go project based on the following code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", allCode)
+	}
+
+	// Generate diagram using LLM
+	diagramText, err := s.llmAdapter.GenerateCompletion(ctx, promptText)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate diagram: %w", err)
+	}
+
+	return mermaid.FormatOutput(diagramText), nil
+}
+
+// retryWithBackoff attempts to call the provided function with exponential backoff
+// for rate limit errors (429 status code)
+func (s *diagramService) retryWithBackoff(ctx context.Context, operation string, fn func() (string, error)) (string, error) {
+	maxRetries := 3
+	baseDelay := 2 * time.Second
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		result, err := fn()
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		// Check if the error is a rate limit error (contains 429 status code)
+		if strings.Contains(err.Error(), "429") {
+			// Calculate backoff with jitter
+			delay := baseDelay * time.Duration(1<<uint(attempt))
+			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
+			waitTime := delay + jitter
+
+			fmt.Printf("Rate limit hit for %s operation, retrying after %v (attempt %d/%d)\n",
+				operation, waitTime, attempt+1, maxRetries)
+
+			// Wait before next attempt
+			select {
+			case <-time.After(waitTime):
+				continue
+			case <-ctx.Done():
+				return "", fmt.Errorf("context canceled while waiting to retry: %w", ctx.Err())
+			}
+		} else {
+			// For non-rate-limit errors, don't retry
+			return "", err
+		}
+	}
+
+	return "", fmt.Errorf("failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// generateConcurrentClassDiagram generates class diagrams for each component type concurrently,
+// validates/fixes them, and then combines them into a single diagram
+func (s *diagramService) generateConcurrentClassDiagram(ctx context.Context) (string, error) {
+	// Component types to process separately
+	componentTypes := []string{"service", "repository", "adapter", "model", "config"}
+
+	type diagramResult struct {
+		componentType string
+		diagram       string
+		err           error
+	}
+
+	// Create a channel to receive results
+	resultCh := make(chan diagramResult, len(componentTypes))
+
+	// Create a validation service for fixing diagrams
+	validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+
+	// Create a semaphore to limit concurrent LLM API calls
+	// Using a buffered channel as a semaphore
+	const maxConcurrentLLMCalls = 2 // Limit to 2 concurrent calls to avoid rate limiting
+	sem := make(chan struct{}, maxConcurrentLLMCalls)
+
+	// Process each component type concurrently
+	for _, compType := range componentTypes {
+		go func(componentType string) {
+			// Find files for this component type
+			files, err := s.fileRepo.FindAllComponentFiles([]string{componentType})
+			if err != nil {
+				resultCh <- diagramResult{componentType: componentType, err: fmt.Errorf("failed to find %s files: %w", componentType, err)}
+				return
+			}
+
+			if len(files) == 0 {
+				// No files for this component type, send empty result
+				resultCh <- diagramResult{componentType: componentType, diagram: ""}
+				return
+			}
+
+			// Read all files for this component type
+			var codeContents []string
+			for _, file := range files {
+				content, err := s.fileRepo.ReadGoFile(file)
+				if err != nil {
+					resultCh <- diagramResult{componentType: componentType, err: fmt.Errorf("failed to read file %s: %w", file, err)}
+					return
+				}
+				codeContents = append(codeContents, fmt.Sprintf("// File: %s\n%s", filepath.Base(file), content))
+			}
+
+			// Join code contents
+			allCode := strings.Join(codeContents, "\n\n")
+
+			// Acquire semaphore before making LLM API call
+			sem <- struct{}{}
+			fmt.Printf("Starting diagram generation for %s component\n", componentType)
+
+			// Create prompt for this component type
+			promptText := fmt.Sprintf("Please create a class diagram for the '%s' components in this Go project. Show their structs, interfaces, methods, and relationships:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", componentType, allCode)
+
+			// Use retryWithBackoff for LLM calls
+			operation := fmt.Sprintf("generate-%s-diagram", componentType)
+			diagramText, err := s.retryWithBackoff(ctx, operation, func() (string, error) {
+				return s.llmAdapter.GenerateCompletion(ctx, promptText)
+			})
+
+			// Release semaphore after LLM API call
+			<-sem
+
+			if err != nil {
+				resultCh <- diagramResult{componentType: componentType, err: fmt.Errorf("failed to generate %s diagram: %w", componentType, err)}
+				return
+			}
+
+			// Validate and fix the diagram if needed
+			formattedDiagram := mermaid.FormatOutput(diagramText)
+			validationResult := mermaid.ValidateSyntax(formattedDiagram)
+
+			if !validationResult.IsValid {
+				fmt.Printf("Diagram for %s component has syntax errors, attempting to fix...\n", componentType)
+
+				// Try to fix the diagram - acquire semaphore before LLM call
+				sem <- struct{}{}
+
+				// Use retryWithBackoff for fixing
+				fixOperation := fmt.Sprintf("fix-%s-diagram", componentType)
+				fixedDiagram, err := s.retryWithBackoff(ctx, fixOperation, func() (string, error) {
+					return validationService.FixMermaidDiagramWithLLM(ctx, formattedDiagram, validationResult)
+				})
+
+				// Release semaphore after LLM API call
+				<-sem
+
+				if err != nil {
+					// If fixing failed, use the original but log the error
+					fmt.Printf("Warning: Failed to fix %s diagram: %v\n", componentType, err)
+				} else {
+					fmt.Printf("Successfully fixed %s diagram\n", componentType)
+					formattedDiagram = fixedDiagram
+				}
+			}
+
+			resultCh <- diagramResult{componentType: componentType, diagram: formattedDiagram}
+		}(compType)
+	}
+
+	// Collect results
+	componentDiagrams := make(map[string]string)
+	var errors []string
+
+	for i := 0; i < len(componentTypes); i++ {
+		result := <-resultCh
+		if result.err != nil {
+			errors = append(errors, result.err.Error())
+		} else if result.diagram != "" {
+			componentDiagrams[result.componentType] = result.diagram
+		}
+	}
+
+	// Check for errors
+	if len(errors) > 0 {
+		return "", fmt.Errorf("errors generating component diagrams: %s", strings.Join(errors, "; "))
+	}
+
+	// Combine diagrams into one
+	if len(componentDiagrams) == 0 {
+		return "", fmt.Errorf("no valid diagrams generated for any component type")
+	}
+
+	// Generate a combined diagram that relates the components
+	var combinedDiagram strings.Builder
+	combinedDiagram.WriteString("classDiagram\n")
+
+	// Extract diagram content without headers and combine
+	for compType, diagram := range componentDiagrams {
+		// Remove the first line (diagram type declaration) and add the content
+		lines := strings.Split(diagram, "\n")
+		if len(lines) > 1 {
+			// Add a comment to identify component section
+			combinedDiagram.WriteString(fmt.Sprintf("  %% %s components\n", strings.ToUpper(compType)))
+			combinedDiagram.WriteString(strings.Join(lines[1:], "\n"))
+			combinedDiagram.WriteString("\n\n")
+		}
+	}
+
+	// Generate relationships between components using LLM - acquire semaphore
+	relationshipPrompt := "Based on the following component definitions, please generate only the relationships between different component types (service, repository, adapter, model, config). Return only Mermaid class diagram relationship syntax (e.g., 'ClassA --> ClassB: uses'):\n\n"
+
+	for compType, diagram := range componentDiagrams {
+		relationshipPrompt += fmt.Sprintf("// %s components\n%s\n\n", compType, diagram)
+	}
+
+	// Acquire semaphore for the final LLM call
+	sem <- struct{}{}
+	fmt.Println("Generating cross-component relationships...")
+
+	// Use retryWithBackoff for relationship generation
+	relationships, err := s.retryWithBackoff(ctx, "generate-relationships", func() (string, error) {
+		return s.llmAdapter.GenerateCompletion(ctx, relationshipPrompt)
+	})
+
+	// Release semaphore
+	<-sem
+
+	if err == nil && relationships != "" {
+		// Add relationships to the combined diagram
+		combinedDiagram.WriteString("  % Cross-component relationships\n")
+
+		// Extract only relationship lines
+		relationshipLines := strings.Split(relationships, "\n")
+		for _, line := range relationshipLines {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "-->") || strings.Contains(line, "<--") ||
+				strings.Contains(line, "--o") || strings.Contains(line, "--*") ||
+				strings.Contains(line, "..>") || strings.Contains(line, "<..") {
+				combinedDiagram.WriteString(line)
+				combinedDiagram.WriteString("\n")
+			}
+		}
+	} else if err != nil {
+		fmt.Printf("Warning: Failed to generate cross-component relationships: %v\n", err)
+	}
+
+	return combinedDiagram.String(), nil
+}
+
+// mapDiagramType converts a string to a DiagramType
+func (s *diagramService) mapDiagramType(dt string) mermaid.DiagramType {
+	switch dt {
+	case "basic":
+		return mermaid.Basic
+	case "sequence":
+		return mermaid.Sequence
+	case "class":
+		return mermaid.Class
+	case "flowchart":
+		return mermaid.Flowchart
+	case "project":
+		return mermaid.Project
+	case "config":
+		return mermaid.Config
+	case "adapters":
+		return mermaid.Adapters
+	default:
+		return mermaid.Basic
+	}
+}
+
+// isValidProjectDiagramType checks if a diagram type is valid for project-wide diagrams
+func isValidProjectDiagramType(dt string) bool {
+	validTypes := []string{"sequence", "class", "config", "adapters"}
+	for _, t := range validTypes {
+		if dt == t {
+			return true
+		}
+	}
+	return false
+}
+
+
+//File: ./internal/service/validation_service.go
+package service
+
+import (
+	"context"
+	"fmt"
+	"mm-go-agent/pkg/llm"
+	"mm-go-agent/pkg/mermaid"
+	"os"
+	"strconv"
+
+	"mm-go-agent/pkg/prompt"
+)
+
+// MaxFixRetries is the default number of retries for fixing Mermaid diagrams
+const MaxFixRetries = 3
+
+// ValidationService handles the validation of Mermaid diagrams
+type ValidationService struct {
+	llmClient  llm.Client
+	promptMgr  *prompt.TemplateManager
+	maxRetries int
+}
+
+// NewValidationService creates a new validation service with the given LLM client
+func NewValidationService(llmClient llm.Client) *ValidationService {
+	// Get max retries from environment variable or use default
+	maxRetries := MaxFixRetries
+	if envRetries := os.Getenv("MERMAID_FIX_RETRIES"); envRetries != "" {
+		if val, err := strconv.Atoi(envRetries); err == nil && val > 0 {
+			maxRetries = val
+		}
+	}
+
+	// Create a prompt template manager
+	promptMgr, err := prompt.New()
+	if err != nil {
+		// Fall back to nil if templates can't be loaded
+		promptMgr = nil
+	}
+
+	return &ValidationService{
+		llmClient:  llmClient,
+		promptMgr:  promptMgr,
+		maxRetries: maxRetries,
+	}
+}
+
+// ValidateMermaidDiagram validates a Mermaid diagram and returns the validation result
+func (s *ValidationService) ValidateMermaidDiagram(diagram string) (mermaid.ValidationResult, error) {
+	result := mermaid.ValidateSyntax(diagram)
+	return result, nil
+}
+
+// FormatValidationResult formats the validation result as a user-friendly string
+func (s *ValidationService) FormatValidationResult(result mermaid.ValidationResult) string {
+	return mermaid.FormatLinterOutput(result)
+}
+
+// FixMermaidDiagramWithLLM uses an LLM to fix a Mermaid diagram with syntax errors
+// It will retry fixing the diagram up to the configured number of retries
+func (s *ValidationService) FixMermaidDiagramWithLLM(ctx context.Context, diagram string, validationResult mermaid.ValidationResult) (string, error) {
+	if validationResult.IsValid {
+		return diagram, nil
+	}
+
+	// Current diagram to fix
+	currentDiagram := diagram
+	currentResult := validationResult
+	fixAttempts := 0
+
+	// Try to fix the diagram up to the maximum number of retries
+	for fixAttempts < s.maxRetries {
+		fixAttempts++
+
+		// Generate prompt for fixing the diagram
+		var prompt string
+		var err error
+
+		if s.promptMgr != nil {
+			// Use the template manager if available
+			prompt, err = s.promptMgr.GetFixPrompt(currentDiagram, currentResult, fixAttempts, s.maxRetries)
+			if err != nil {
+				// Fall back to manual prompt construction if template fails
+				validationContext := mermaid.ValidationResultAsContext(currentResult)
+				retryInfo := ""
+				if fixAttempts > 1 {
+					retryInfo = fmt.Sprintf("\nThis is fix attempt %d/%d. Previous attempts still had errors.", fixAttempts, s.maxRetries)
+				}
+				prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Fix the following Mermaid diagram that has syntax errors.
+Here are the errors identified by the validator:%s
+
+%s
+
+Here is the diagram to fix:
+
+%s
+
+Please provide a complete, fixed version of the diagram that resolves all syntax errors.
+Only respond with the corrected Mermaid diagram code, without any explanations or markdown formatting.
+`, retryInfo, validationContext, currentDiagram)
+			}
+		} else {
+			// Fall back to manual prompt construction if template manager is not available
+			validationContext := mermaid.ValidationResultAsContext(currentResult)
+			retryInfo := ""
+			if fixAttempts > 1 {
+				retryInfo = fmt.Sprintf("\nThis is fix attempt %d/%d. Previous attempts still had errors.", fixAttempts, s.maxRetries)
+			}
+			prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Fix the following Mermaid diagram that has syntax errors.
+Here are the errors identified by the validator:%s
+
+%s
+
+Here is the diagram to fix:
+
+%s
+
+Please provide a complete, fixed version of the diagram that resolves all syntax errors.
+Only respond with the corrected Mermaid diagram code, without any explanations or markdown formatting.
+`, retryInfo, validationContext, currentDiagram)
+		}
+
+		response, err := s.llmClient.GenerateText(ctx, prompt)
+		if err != nil {
+			return "", fmt.Errorf("error generating fixed diagram (attempt %d): %w", fixAttempts, err)
+		}
+
+		// Re-validate the fixed diagram
+		fixedDiagram := response
+		fixedResult := mermaid.ValidateSyntax(fixedDiagram)
+
+		// If the diagram is now valid, return it
+		if fixedResult.IsValid {
+			return fixedDiagram, nil
+		}
+
+		// Update current diagram and result for the next attempt
+		currentDiagram = fixedDiagram
+		currentResult = fixedResult
+
+		// If we've reached the maximum number of retries, return the best attempt with an error
+		if fixAttempts >= s.maxRetries {
+			return currentDiagram, fmt.Errorf("could not fix diagram after %d attempts, %d errors remain: %s",
+				fixAttempts, len(currentResult.Errors), mermaid.FormatLinterOutput(currentResult))
+		}
+	}
+
+	// This should not be reached due to the check inside the loop
+	return currentDiagram, fmt.Errorf("diagram still has errors: %s", mermaid.FormatLinterOutput(currentResult))
+}
+
+// ExplainMermaidDiagramErrors uses an LLM to explain Mermaid syntax errors in a user-friendly way
+func (s *ValidationService) ExplainMermaidDiagramErrors(ctx context.Context, validationResult mermaid.ValidationResult) (string, error) {
+	if validationResult.IsValid {
+		return "The Mermaid diagram is valid. No errors to explain.", nil
+	}
+
+	// Generate prompt for explaining errors
+	var prompt string
+	var err error
+
+	if s.promptMgr != nil {
+		// Use the template manager if available
+		prompt, err = s.promptMgr.GetExplanationPrompt(validationResult.Diagram, validationResult)
+		if err != nil {
+			// Fall back to manual prompt construction if template fails
+			validationContext := mermaid.ValidationResultAsContext(validationResult)
+			prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Explain the following errors in a Mermaid diagram in a clear, user-friendly way.
+Here are the errors identified by the validator:
+
+%s
+
+Here is the diagram with errors:
+
+%s
+
+Please provide a detailed explanation of what's wrong with the diagram and how to fix each error.
+Use a friendly, educational tone as if you're teaching someone about Mermaid syntax.
+`, validationContext, validationResult.Diagram)
+		}
+	} else {
+		// Fall back to manual prompt construction if template manager is not available
+		validationContext := mermaid.ValidationResultAsContext(validationResult)
+		prompt = fmt.Sprintf(`
+You are a Mermaid diagram syntax expert. Explain the following errors in a Mermaid diagram in a clear, user-friendly way.
+Here are the errors identified by the validator:
+
+%s
+
+Here is the diagram with errors:
+
+%s
+
+Please provide a detailed explanation of what's wrong with the diagram and how to fix each error.
+Use a friendly, educational tone as if you're teaching someone about Mermaid syntax.
+`, validationContext, validationResult.Diagram)
+	}
+
+	response, err := s.llmClient.GenerateText(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("error generating error explanation: %w", err)
+	}
+
+	return response, nil
+}
+
+
+//File: ./pkg/llm/client.go
+package llm
+
+import (
+	"context"
+)
+
+// Client is an interface for text generation using LLMs
+type Client interface {
+	// GenerateText generates text from a prompt
+	GenerateText(ctx context.Context, prompt string) (string, error)
+}
+
+
+//File: ./pkg/mermaid/prompt.go
+package mermaid
+
+import "fmt"
+
+// DiagramType represents the type of Mermaid diagram to generate
+type DiagramType string
+
+const (
+	// Basic diagram type
+	Basic DiagramType = "basic"
+	// Sequence diagram type
+	Sequence DiagramType = "sequence"
+	// Class diagram type
+	Class DiagramType = "class"
+	// Flowchart diagram type
+	Flowchart DiagramType = "flowchart"
+	// Project diagram type for project-wide mapping
+	Project DiagramType = "project"
+	// Config diagram type for showing config interactions
+	Config DiagramType = "config"
+	// Adapters diagram type for showing inbound/outbound communications
+	Adapters DiagramType = "adapters"
+)
+
+// CreatePrompt creates a prompt for generating a Mermaid diagram
+func CreatePrompt(codeContent string, diagramType DiagramType) string {
+	var prompt string
+
+	switch diagramType {
+	case Basic:
+		prompt = fmt.Sprintf("Please create a basic Mermaid diagram that shows the main components and their relationships from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Sequence:
+		prompt = fmt.Sprintf("Please create a Mermaid sequence diagram that shows the flow of execution and method calls from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Class:
+		prompt = fmt.Sprintf("Please create a Mermaid class diagram that shows the struct definitions, their fields, methods, and relationships from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Flowchart:
+		prompt = fmt.Sprintf("Please create a Mermaid flowchart diagram that shows the control flow from this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Project:
+		prompt = fmt.Sprintf("Please create a Mermaid diagram that shows the overall project architecture based on this Go code. Include all major components and their relationships:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Config:
+		prompt = fmt.Sprintf("Please create a Mermaid diagram that shows how configuration is structured and used throughout the application based on this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	case Adapters:
+		prompt = fmt.Sprintf("Please create a Mermaid diagram that shows all inbound and outbound communications in the application, focusing on adapter components and their interactions with external systems:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	default:
+		prompt = fmt.Sprintf("Please create a Mermaid diagram that represents this Go code:\n\n```go\n%s\n```\n\nProvide only the Mermaid diagram syntax without any explanation or markdown formatting.", codeContent)
+	}
+
+	return prompt
+}
+
+// FormatOutput formats the diagram output with Mermaid markers
+func FormatOutput(diagram string) string {
+	return fmt.Sprintf("```mermaid\n%s\n```", diagram)
+}
+
+
+//File: ./pkg/mermaid/validator.go
+package mermaid
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// SyntaxError represents an error in the Mermaid diagram syntax
+type SyntaxError struct {
+	Line    int    `json:"line"`
+	Message string `json:"message"`
+	Text    string `json:"text,omitempty"`
+}
+
+// ValidationResult contains the result of validating a Mermaid diagram
+type ValidationResult struct {
+	IsValid  bool          `json:"isValid"`
+	Errors   []SyntaxError `json:"errors,omitempty"`
+	Diagram  string        `json:"diagram"`
+	ErrorMsg string        `json:"errorMsg,omitempty"`
+}
+
+// ValidateSyntax checks if the given Mermaid diagram has valid syntax
+// It returns a ValidationResult containing validation information
+func ValidateSyntax(diagram string) ValidationResult {
+	// Remove the mermaid markdown formatting if present
+	cleanDiagram := strings.TrimPrefix(diagram, "```mermaid\n")
+	cleanDiagram = strings.TrimSuffix(cleanDiagram, "\n```")
+
+	// Create temporary file to store the diagram
+	tempDir, err := os.MkdirTemp("", "mermaid-validation")
+	if err != nil {
+		return ValidationResult{
+			IsValid:  false,
+			Diagram:  diagram,
+			ErrorMsg: fmt.Sprintf("Failed to create temporary directory: %v", err),
+		}
+	}
+	defer os.RemoveAll(tempDir)
+
+	tempFile := filepath.Join(tempDir, "diagram.mmd")
+	if err := os.WriteFile(tempFile, []byte(cleanDiagram), 0644); err != nil {
+		return ValidationResult{
+			IsValid:  false,
+			Diagram:  diagram,
+			ErrorMsg: fmt.Sprintf("Failed to write temporary file: %v", err),
+		}
+	}
+
+	// Check if mmdc (Mermaid CLI) is installed
+	if _, err := exec.LookPath("mmdc"); err != nil {
+		// If not installed, fall back to basic syntax checking
+		return basicSyntaxCheck(cleanDiagram)
+	}
+
+	// Use mmdc to validate the syntax
+	cmd := exec.Command("mmdc", "-i", tempFile, "-o", filepath.Join(tempDir, "output.svg"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Parse the error output to extract syntax errors
+		errorOutput := stderr.String()
+		return parseErrorOutput(errorOutput, cleanDiagram)
+	}
+
+	return ValidationResult{
+		IsValid: true,
+		Diagram: diagram,
+	}
+}
+
+// basicSyntaxCheck performs a basic syntax check without external tools
+func basicSyntaxCheck(diagram string) ValidationResult {
+	result := ValidationResult{
+		IsValid: true,
+		Diagram: diagram,
+	}
+
+	lines := strings.Split(diagram, "\n")
+
+	// Check for essential Mermaid elements
+	if len(lines) == 0 {
+		result.IsValid = false
+		result.Errors = append(result.Errors, SyntaxError{
+			Line:    0,
+			Message: "Empty diagram",
+		})
+		return result
+	}
+
+	// Check if the first line declares a valid diagram type
+	firstLine := strings.TrimSpace(lines[0])
+	validTypes := []string{"graph ", "flowchart ", "sequenceDiagram", "classDiagram", "stateDiagram",
+		"erDiagram", "journey", "gantt", "pie", "requirementDiagram", "gitGraph"}
+
+	isValidType := false
+	for _, t := range validTypes {
+		if strings.HasPrefix(firstLine, t) {
+			isValidType = true
+			break
+		}
+	}
+
+	if !isValidType {
+		result.IsValid = false
+		result.Errors = append(result.Errors, SyntaxError{
+			Line:    1,
+			Message: "Invalid or missing diagram type declaration",
+			Text:    firstLine,
+		})
+	}
+
+	// Check for common syntax errors
+	for i, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Skip comments and empty lines
+		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "%%") {
+			continue
+		}
+
+		// Check for unclosed quotes
+		if strings.Count(trimmedLine, "\"")%2 != 0 {
+			result.IsValid = false
+			result.Errors = append(result.Errors, SyntaxError{
+				Line:    i + 1,
+				Message: "Unclosed quotes",
+				Text:    trimmedLine,
+			})
+		}
+
+		// Check for mismatched brackets
+		if strings.Count(trimmedLine, "[") != strings.Count(trimmedLine, "]") {
+			result.IsValid = false
+			result.Errors = append(result.Errors, SyntaxError{
+				Line:    i + 1,
+				Message: "Mismatched square brackets",
+				Text:    trimmedLine,
+			})
+		}
+
+		if strings.Count(trimmedLine, "(") != strings.Count(trimmedLine, ")") {
+			result.IsValid = false
+			result.Errors = append(result.Errors, SyntaxError{
+				Line:    i + 1,
+				Message: "Mismatched parentheses",
+				Text:    trimmedLine,
+			})
+		}
+
+		if strings.Count(trimmedLine, "{") != strings.Count(trimmedLine, "}") {
+			result.IsValid = false
+			result.Errors = append(result.Errors, SyntaxError{
+				Line:    i + 1,
+				Message: "Mismatched curly braces",
+				Text:    trimmedLine,
+			})
+		}
+	}
+
+	return result
+}
+
+// parseErrorOutput parses the error output from mmdc to extract syntax errors
+func parseErrorOutput(errorOutput, diagram string) ValidationResult {
+	result := ValidationResult{
+		IsValid:  false,
+		Diagram:  diagram,
+		ErrorMsg: errorOutput,
+	}
+
+	// Extract line numbers and error messages
+	// This is a simplified parser and might need adjustments based on actual mmdc output format
+	lines := strings.Split(errorOutput, "\n")
+	diagramLines := strings.Split(diagram, "\n")
+
+	for _, line := range lines {
+		// Look for patterns like "Error: Parse error on line X:"
+		if strings.Contains(line, "Error") && strings.Contains(line, "line") {
+			parts := strings.Split(line, "line")
+			if len(parts) > 1 {
+				lineNumStr := strings.TrimSpace(strings.Split(parts[1], ":")[0])
+				var lineNum int
+				fmt.Sscanf(lineNumStr, "%d", &lineNum)
+
+				errorMsg := strings.TrimSpace(strings.Join(parts[1:], ""))
+
+				// Get the text from the line with the error
+				var lineText string
+				if lineNum > 0 && lineNum <= len(diagramLines) {
+					lineText = diagramLines[lineNum-1]
+				}
+
+				result.Errors = append(result.Errors, SyntaxError{
+					Line:    lineNum,
+					Message: errorMsg,
+					Text:    lineText,
+				})
+			}
+		}
+	}
+
+	// If no specific errors were parsed but there was an error output,
+	// add a generic error
+	if len(result.Errors) == 0 && errorOutput != "" {
+		result.Errors = append(result.Errors, SyntaxError{
+			Line:    0,
+			Message: "Syntax error in diagram",
+			Text:    errorOutput,
+		})
+	}
+
+	return result
+}
+
+// FormatLinterOutput formats the validation result as a string
+func FormatLinterOutput(result ValidationResult) string {
+	if result.IsValid {
+		return "Mermaid diagram syntax is valid."
+	}
+
+	var output strings.Builder
+	output.WriteString("Mermaid diagram syntax validation failed:\n\n")
+
+	for _, err := range result.Errors {
+		if err.Line > 0 {
+			output.WriteString(fmt.Sprintf("Line %d: %s\n", err.Line, err.Message))
+			if err.Text != "" {
+				output.WriteString(fmt.Sprintf("  %s\n", err.Text))
+			}
+		} else {
+			output.WriteString(fmt.Sprintf("%s\n", err.Message))
+		}
+	}
+
+	if result.ErrorMsg != "" && len(result.Errors) == 0 {
+		output.WriteString(fmt.Sprintf("\nError details:\n%s\n", result.ErrorMsg))
+	}
+
+	return output.String()
+}
+
+// ValidationResultAsContext formats the validation result as context for an LLM
+func ValidationResultAsContext(result ValidationResult) string {
+	jsonBytes, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error creating validation context: %v", err)
+	}
+	return string(jsonBytes)
+}
+
+
+//File: ./pkg/prompt/prompt.go
+package prompt
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/template"
+
+	"mm-go-agent/pkg/mermaid"
+)
+
+// TemplateManager handles the loading and execution of prompt templates
+type TemplateManager struct {
+	templates *template.Template
+}
+
+// New creates a new TemplateManager
+func New() (*TemplateManager, error) {
+	// Get the current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Find the templates directory relative to the current directory
+	// Try different relative paths to handle various test environments
+	templatesDir := filepath.Join(cwd, "templates")
+	if _, err := os.Stat(templatesDir); os.IsNotExist(err) {
+		// If running from project root
+		templatesDir = filepath.Join(cwd, "pkg", "prompt", "templates")
+		if _, err := os.Stat(templatesDir); os.IsNotExist(err) {
+			// If running from a test directory
+			templatesDir = filepath.Join(cwd, "..", "prompt", "templates")
+		}
+	}
+
+	// Load all templates from the directory
+	templates, err := template.ParseGlob(filepath.Join(templatesDir, "*.tmpl"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse templates: %w", err)
+	}
+
+	return &TemplateManager{
+		templates: templates,
+	}, nil
+}
+
+// DiagramPromptData contains the data for generating a diagram prompt
+type DiagramPromptData struct {
+	CodeContent string
+	DiagramType string
+}
+
+// ValidationPromptData contains the data for generating a validation prompt
+type ValidationPromptData struct {
+	Diagram          string
+	ValidationResult string
+	RetryInfo        string
+	AttemptNum       int
+	MaxRetries       int
+}
+
+// GetDiagramPrompt generates a prompt for creating a mermaid diagram
+func (m *TemplateManager) GetDiagramPrompt(codeContent string, diagramType mermaid.DiagramType) (string, error) {
+	templateName := fmt.Sprintf("%s_diagram.tmpl", diagramType)
+
+	data := DiagramPromptData{
+		CodeContent: codeContent,
+		DiagramType: string(diagramType),
+	}
+
+	var buf strings.Builder
+	if err := m.templates.ExecuteTemplate(&buf, templateName, data); err != nil {
+		return "", fmt.Errorf("failed to execute template %q: %w", templateName, err)
+	}
+
+	return buf.String(), nil
+}
+
+// GetFixPrompt generates a prompt for fixing a mermaid diagram
+func (m *TemplateManager) GetFixPrompt(diagram string, validationResult mermaid.ValidationResult, attemptNum, maxRetries int) (string, error) {
+	retryInfo := ""
+	if attemptNum > 1 {
+		retryInfo = fmt.Sprintf("This is fix attempt %d/%d. Previous attempts still had errors.", attemptNum, maxRetries)
+	}
+
+	data := ValidationPromptData{
+		Diagram:          diagram,
+		ValidationResult: mermaid.ValidationResultAsContext(validationResult),
+		RetryInfo:        retryInfo,
+		AttemptNum:       attemptNum,
+		MaxRetries:       maxRetries,
+	}
+
+	var buf strings.Builder
+	if err := m.templates.ExecuteTemplate(&buf, "fix_diagram.tmpl", data); err != nil {
+		return "", fmt.Errorf("failed to execute template %q: %w", "fix_diagram.tmpl", err)
+	}
+
+	return buf.String(), nil
+}
+
+// GetExplanationPrompt generates a prompt for explaining mermaid diagram errors
+func (m *TemplateManager) GetExplanationPrompt(diagram string, validationResult mermaid.ValidationResult) (string, error) {
+	data := ValidationPromptData{
+		Diagram:          diagram,
+		ValidationResult: mermaid.ValidationResultAsContext(validationResult),
+	}
+
+	var buf strings.Builder
+	if err := m.templates.ExecuteTemplate(&buf, "explain_errors.tmpl", data); err != nil {
+		return "", fmt.Errorf("failed to execute template %q: %w", "explain_errors.tmpl", err)
+	}
+
+	return buf.String(), nil
+}
+
+
+//File: ./pkg/prompt/prompt_test.go
+package prompt
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"text/template"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+
+	"mm-go-agent/pkg/mermaid"
+)
+
+// PromptTestSuite is a test suite for the prompt package
+type PromptTestSuite struct {
+	suite.Suite
+	tempDir          string
+	templateManager  *TemplateManager
+	sampleDiagram    string
+	validationResult mermaid.ValidationResult
+	sampleGoCode     string
+}
+
+// SetupSuite prepares the test suite
+func (s *PromptTestSuite) SetupSuite() {
+	// Sample Go code for testing
+	s.sampleGoCode = `
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello, world!")
+}
+`
+
+	// Sample mermaid diagram with errors
+	s.sampleDiagram = `
+classDiagram
+  class User {
+    +string ID
+    +string Name
+  }
+  class Order {
+    +string OrderID
+  }
+  User --> Order
+`
+
+	// Mock validation result
+	s.validationResult = mermaid.ValidationResult{
+		IsValid: false,
+		Diagram: s.sampleDiagram,
+		Errors: []mermaid.SyntaxError{
+			{
+				Message: "Class 'User' not properly defined",
+				Line:    3,
+				Text:    "  class User {",
+			},
+		},
+		ErrorMsg: "Syntax validation failed",
+	}
+}
+
+// SetupTest runs before each test
+func (s *PromptTestSuite) SetupTest() {
+	// Create a temporary directory
+	tempDir, err := os.MkdirTemp("", "prompt-test")
+	require.NoError(s.T(), err, "Failed to create temp directory")
+
+	// Create templates directory
+	templatesDir := filepath.Join(tempDir, "templates")
+	err = os.Mkdir(templatesDir, 0755)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		require.NoError(s.T(), err, "Failed to create templates directory")
+	}
+
+	// Create sample templates
+	templates := map[string]string{
+		"basic_diagram.tmpl":     "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a Mermaid diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"class_diagram.tmpl":     "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a class diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"sequence_diagram.tmpl":  "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a sequence diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"flowchart_diagram.tmpl": "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a flowchart diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"project_diagram.tmpl":   "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a project diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"config_diagram.tmpl":    "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate a config diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"adapters_diagram.tmpl":  "You are a Mermaid diagram expert\n\n# INSTRUCTIONS\nCreate an adapters diagram from this Go code:\n\n```go\n{{.CodeContent}}\n```",
+		"fix_diagram.tmpl":       "You are a Mermaid diagram syntax expert\n\n# CONTEXT\n{{if .RetryInfo}}\n{{.RetryInfo}}\n{{end}}\n\n{{.ValidationResult}}\n\n```mermaid\n{{.Diagram}}\n```",
+		"explain_errors.tmpl":    "You are a Mermaid diagram syntax expert\n\n{{.ValidationResult}}\n\n```mermaid\n{{.Diagram}}\n```",
+	}
+
+	for filename, content := range templates {
+		err := os.WriteFile(filepath.Join(templatesDir, filename), []byte(content), 0644)
+		if err != nil {
+			os.RemoveAll(tempDir)
+			require.NoError(s.T(), err, "Failed to write template file %s", filename)
+		}
+	}
+
+	s.tempDir = tempDir
+
+	// Create template manager
+	templatesDir = filepath.Join(tempDir, "templates")
+	tmpl, err := template.ParseGlob(filepath.Join(templatesDir, "*.tmpl"))
+	require.NoError(s.T(), err, "Failed to parse templates")
+
+	s.templateManager = &TemplateManager{
+		templates: tmpl,
+	}
+}
+
+// TearDownTest runs after each test
+func (s *PromptTestSuite) TearDownTest() {
+	if s.tempDir != "" {
+		os.RemoveAll(s.tempDir)
+	}
+}
+
+// TestLoadTemplates tests that the template manager can be created
+func (s *PromptTestSuite) TestLoadTemplates() {
+	assert.NotNil(s.T(), s.templateManager, "Template manager should not be nil")
+}
+
+// TestGetDiagramPrompt tests generating prompts for different diagram types
+func (s *PromptTestSuite) TestGetDiagramPrompt() {
+	// Test cases for each diagram type
+	testCases := []struct {
+		diagramType mermaid.DiagramType
+		expectError bool
+	}{
+		{mermaid.Basic, false},
+		{mermaid.Class, false},
+		{mermaid.Sequence, false},
+		{mermaid.Flowchart, false},
+		{mermaid.Project, false},
+		{mermaid.Config, false},
+		{mermaid.Adapters, false},
+		{"nonexistent", true}, // This should fail as the template doesn't exist
+	}
+
+	for _, tc := range testCases {
+		s.Run(fmt.Sprintf("DiagramType=%s", tc.diagramType), func() {
+			prompt, err := s.templateManager.GetDiagramPrompt(s.sampleGoCode, tc.diagramType)
+
+			if tc.expectError {
+				assert.Error(s.T(), err, "Expected error for diagram type %s, but got none", tc.diagramType)
+				return
+			}
+
+			assert.NoError(s.T(), err, "Unexpected error for diagram type %s", tc.diagramType)
+
+			// Verify the prompt contains the sample code
+			assert.Contains(s.T(), prompt, s.sampleGoCode, "Prompt does not contain the sample code for diagram type %s", tc.diagramType)
+
+			// Verify the prompt contains common expected elements
+			expectedElements := []string{
+				"You are a Mermaid diagram expert",
+				"INSTRUCTIONS",
+			}
+
+			for _, element := range expectedElements {
+				assert.Contains(s.T(), prompt, element, "Prompt does not contain expected element %q for diagram type %s", element, tc.diagramType)
+			}
+		})
+	}
+}
+
+// TestGetFixPrompt tests generating prompts for fixing diagrams
+func (s *PromptTestSuite) TestGetFixPrompt() {
+	// Test getting fix prompt
+	prompt, err := s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 1, 3)
+	assert.NoError(s.T(), err, "Unexpected error getting fix prompt")
+
+	// Verify the prompt contains important elements
+	expectedElements := []string{
+		"Mermaid diagram syntax expert",
+		"CONTEXT",
+		s.sampleDiagram,
+	}
+
+	for _, element := range expectedElements {
+		assert.Contains(s.T(), prompt, element, "Fix prompt does not contain expected element %q", element)
+	}
+
+	// Test with retry info
+	prompt, err = s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 2, 3)
+	assert.NoError(s.T(), err, "Unexpected error getting fix prompt with retry")
+
+	assert.Contains(s.T(), prompt, "This is fix attempt 2/3", "Fix prompt does not contain retry information")
+}
+
+// TestGetExplanationPrompt tests generating prompts for explaining errors
+func (s *PromptTestSuite) TestGetExplanationPrompt() {
+	// Test getting explanation prompt
+	prompt, err := s.templateManager.GetExplanationPrompt(s.sampleDiagram, s.validationResult)
+	assert.NoError(s.T(), err, "Unexpected error getting explanation prompt")
+
+	// Verify the prompt contains important elements
+	expectedElements := []string{
+		"Mermaid diagram syntax expert",
+		s.sampleDiagram,
+	}
+
+	for _, element := range expectedElements {
+		assert.Contains(s.T(), prompt, element, "Explanation prompt does not contain expected element %q", element)
+	}
+}
+
+// TestPromptSuite runs the test suite
+func TestPromptSuite(t *testing.T) {
+	suite.Run(t, new(PromptTestSuite))
+}
+
+

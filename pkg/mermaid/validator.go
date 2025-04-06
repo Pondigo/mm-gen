@@ -60,6 +60,10 @@ func ValidateSyntax(diagram string) ValidationResult {
 
 	// Use mmdc to validate the syntax
 	cmd := exec.Command("mmdc", "-i", tempFile, "-o", filepath.Join(tempDir, "output.svg"))
+	// tmp svg file
+	tmpSvgFile := filepath.Join(tempDir, "output.svg")
+	// Print tmp svg file
+	fmt.Println("Temp svg file:", tmpSvgFile)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

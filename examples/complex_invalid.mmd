@@ -1,0 +1,192 @@
+classDiagram
+    class Service {
+      +processRequest(request Request) Response
+      +validateInput(data string) bool
+      +handleError(err Error) ErrorResponse
+    
+    class DefaultService {
+      -repository Repository
+      -logger Logger
+      +processRequest(request Request) Response
+      +validateInput(data string) bool
+    
+
+    class MockService {
+      +processRequest(request Request) Response
+    
+
+    class SessionService {
+      -sessions map
+      -timeout int
+      +createSession(user User) Session
+      +getSession(sessionId string) Session
+      +updateSession(session Session) bool
+      +deleteSession(sessionId string) bool
+      +validateSession(sessionId string) bool
+      +cleanExpiredSessions() int
+      +getActiveSessionCount() int
+    
+
+    class STPService {
+      -fixAcceptor FixAcceptor
+      -orderManager OrderManager
+      -configRepo ConfigRepository
+      -logger Logger
+      +handleMessage(message Message) bool
+      +processOrder(order Order) OrderResult
+      +cancelOrder(orderId string) bool
+      +validateOrder(order Order) bool
+      +reconcileOrders() ReconciliationResult
+    
+
+    class WhitelistService {
+      -repo WhitelistRepository
+      -logger Logger
+      +checkAddress(address string) bool
+      +addToWhitelist(address string) bool
+    
+
+    class Repository {
+      +findAll() []Entity
+      +findById(id string) Entity
+    
+
+    class DefaultRepository {
+      -db Database
+      +findAll() []Entity
+      +findById(id string) Entity
+    
+
+    class MockRepository {
+      +findAll() []Entity
+    
+
+    class ConfigRepository {
+      -configPath string
+      -cachedConfig Config
+      +getConfig() Config
+      +updateConfig(config Config) bool
+      +reloadConfig() bool
+    
+
+    class FixAcceptor {
+      -port int
+      -handlers map
+      -session Session
+      -logger Logger
+      -isRunning bool
+      +start() bool
+      +stop() bool
+      +registerHandler(messageType string, handler MessageHandler) bool
+      +logon(credentials Credentials) Session
+      +logout() bool
+      +isConnected() bool
+      +sendMessage(message Message) bool
+      +getSession() Session
+      +getSessionStatus() SessionStatus
+    
+
+    class FixManager {
+      -acceptors []FixAcceptor
+      -logger Logger
+      +registerAcceptor(acceptor FixAcceptor) bool
+      +startAll() bool
+      +stopAll() bool
+    
+
+    class ExampleController {
+      -service Service
+      -logger Logger
+      +handleRequest(request Request) Response
+      +validateRequest(request Request) bool
+    
+
+    class ExampleModel {
+      -id string
+      -name string
+    
+
+    class ExampleRequest {
+      -parameters map
+      -body string
+    
+
+    class ExampleResponse {
+      -statusCode int
+      -body string
+      -headers map
+    
+
+    class STPEvent {
+      -id string
+      -type string
+      -timestamp int
+      -data map
+      -source string
+      -target string
+      -correlationId string
+      -priority int
+      -processed bool
+      -processingErrors []string
+      -retry int
+      -maxRetries int
+      +isExpired() bool
+      +incrementRetry() bool
+      +addError(error string) void
+      +markProcessed() void
+      +getRetryCount() int
+    
+
+    class Message {
+      -type string
+      -content string
+    
+
+    class SessionID {
+      -creationTime int
+      -address string
+      -counter int
+      -sessionPrefix string
+      +toString() string
+      +getCreationTime() int
+      +getAddress() string
+      +getCounter() int
+    
+
+    class SessionInfo {
+      -id SessionID
+      -lastActivity int
+      -status SessionStatus
+      -userData map
+      +isExpired(timeout int) bool
+    
+
+    class SessionsMap {
+      -sessions map
+      +get(id string) SessionInfo
+    
+
+    class ConnectionValidator {
+      +validate(connection Connection) bool
+    
+
+    class MessageHandler {
+      +handle(message Message) bool
+    
+
+    class sessions.Service {
+      +createSession(user User) Session
+      +validateSession(sessionId string) bool
+      +deleteSession(sessionId string) bool
+      +cleanExpiredSessions() int
+    
+
+    class stp.Service {
+      +handleMessage(message Message) bool
+      +validateOrder(order Order) bool
+    
+
+    class whitelist.Service {
+      +checkAddress(address string) bool
+      +addToWhitelist(address string) bool
+    } 

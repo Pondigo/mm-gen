@@ -1,0 +1,245 @@
+classDiagram
+    %% Services
+    class Service {
+        <<interface>>
+        +Create(ctx context.Context, payload models.ExampleRequest) (models.ExampleResponse, error)
+    }
+
+    class DefaultService {
+        -exampleRepo example.Repository
+        +NewDefaultService(es example.Repository) *DefaultService
+        +Create(ctx context.Context, payload models.ExampleRequest) (models.ExampleResponse, error)
+    }
+
+    class MockService {
+        +Create(ctx context.Context, payload models.ExampleRequest) (models.ExampleResponse, error)
+    }
+
+    class SessionService {
+        -log *zap.SugaredLogger
+        -fixAdapter fix.Acceptor
+        -insititutionRepo intitutions.Repository
+        -entitySessions sync.Map
+        -sessionEntities sync.Map
+        +NewSessionService(insititutionRepo intitutions.Repository, fixAdapter fix.Acceptor, log *zap.SugaredLogger) *SessionService
+        +RegisterEntity(entityID string, sessionID fix.SessionID)
+        +UnregisterEntity(entityID string, sessionID fix.SessionID)
+        +GetSessionsForEntity(entityID string) []fix.SessionID
+        +GetEntitiesForSession(sessionID fix.SessionID) []string
+        +SendToEntity(message *fix.Message, entityID string) error
+        +Validate(netConn net.Conn, session fix.SessionID) error
+    }
+
+    class STPService {
+        -broker *broker.Broker
+        -fix fix.Acceptor
+        -SessionService sessions.Service
+        -tscc config.NatsConsumerConfigurations
+        -v *validator.Validator
+        -tscons broker.Consumer[events.TransactionCreated]
+        -instWlSvc whitelist.Service
+        -dlqProducer broker.Producer[events.DummyCreated]
+        -log *zap.SugaredLogger
+        +NewSTPService(bk *broker.Broker, fbk fix.Acceptor, cc config.NatsConsumerConfigurations, instWlSvc whitelist.Service, SessionService sessions.Service) Service
+        +Start() error
+        +Stop()
+    }
+
+    class WhitelistService {
+        -enabled bool
+        -whitelist map[uuid.UUID]bool
+        +NewWhitelistService(config config.WhitelistConfigurations) *WhitelistService
+        +IsWhitelisted(institution uuid.UUID) bool
+        +SetWhitelisted(institution uuid.UUID, whitelisted bool)
+    }
+
+    %% Repositories
+    class Repository {
+        <<interface>>
+        +FindById(ctx context.Context, id string) (*models.ExampleModel, error)
+    }
+
+    class DefaultRepository {
+        -db *bun.DB
+        +NewDefaultRepository(db *bun.DB) *DefaultRepository
+        +FindById(ctx context.Context, id string) (*models.ExampleModel, error)
+    }
+
+    class MockRepository {
+        +FindById(ctx context.Context, id string) (*models.ExampleModel, error)
+    }
+
+    class ConfigRepository {
+        -config []config.InstitutionInMemoryForFIX
+        +NewConfigRepository(config []config.InstitutionInMemoryForFIX) *ConfigRepository
+        +GetAllowedRoles(id uuid.UUID) ([]string, error)
+        +GetIDByFIXPrefix(prefix string) (uuid.UUID, error)
+        +GetAllInstitutionIDs() []uuid.UUID
+    }
+
+    %% Adapters
+    class FixAcceptor {
+        -log *zap.SugaredLogger
+        -serverConfig config.FixConfigurations
+        -sessionConfig []config.FixSessionConfigurations
+        -acceptor *quickfix.Acceptor
+        -sessions *SessionsMap
+        -settings *quickfix.Settings
+        -app *quickFixApp
+        -callbacks *CallbackRegistry
+        -handlers *HandlerRegistry
+        -connectionValidator *ConnectionValidator
+        +NewAcceptor(serverConfig config.FixConfigurations, sessionConfig ...config.FixSessionConfigurations) (*FixAcceptor, error)
+        +Start() error
+        +Stop()
+        +Broadcast(message *Message) error
+        +SendToTarget(message *Message, session SessionID) error
+        +RegisterHandler(handler MessageHandler)
+        +SetConnectionValidator(validator ConnectionValidator)
+        +GetSessionStatus(sessionID SessionID) (*SessionInfo, bool)
+    }
+
+    class FixManager {
+        -initiator *quickfix.Initiator
+        -app quickfix.Application
+        -sessionConfig config.FixSessionConfigurations
+        +NewInitiatior(app quickfix.Application, serverConfig config.FixConfigurations, sessionConfig config.FixSessionConfigurations) (*FixManager, error)
+        +Start() error
+        +Stop()
+    }
+
+    class ExampleController {
+        -validate *validator.Validator
+        -exampleSvc examples.Service
+        -opaSvc *opa.Service
+        +NewExampleController(router *chi.Mux, v *validator.Validator, pwc pistis.IWebClient, s examples.Service, os *opa.Service) *ExampleController
+        +handleGet(w http.ResponseWriter, r *http.Request)
+        +handlePost(w http.ResponseWriter, r *http.Request)
+    }
+
+    %% Models
+    class ExampleModel {
+        +ID string
+        +Name string
+    }
+
+    class ExampleRequest {
+        +Key string
+        +Value string
+    }
+
+    class ExampleResponse {
+        +Key string
+        +Value string
+        +CreatedAt string
+    }
+
+    class STPEvent {
+        +ExecID string
+        +SecurityID string
+        +Symbol string
+        +TransactTime time.Time
+        +SettlDate string
+        +TradeDate string
+        +Product int
+        +SecurityType string
+        +CumQty uint
+        +OrderID string
+        +OrdStatus int
+        +Price decimal.Decimal
+        +PriceType int
+        +Side int
+        +LeavesQty int
+        +Partys []events.Party
+        +OrderQty uint
+        +Currency string
+        +ExecType string
+    }
+
+    class Message {
+        +*quickfix.Message
+        +NewMessage() *Message
+    }
+
+    class SessionID {
+        +BeginString string
+        +SenderCompID string
+        +TargetCompID string
+        +String() string
+        +ToQuickFixSessionID() quickfix.SessionID
+        +ToQuickFixResponseSessionID() quickfix.SessionID
+        +ToResponseSessionID() SessionID
+    }
+
+    class SessionInfo {
+        +Status string
+        +Configuration config.FixSessionConfigurations
+        +CreatedAt time.Time
+        +LastLogonAt time.Time
+        +LastLogoutAt time.Time
+    }
+
+    class SessionsMap {
+        -sessions sync.Map
+        +Range(f func(key, value interface{}) bool)
+    }
+
+    %% Interfaces
+    class ConnectionValidator {
+        <<interface>>
+        +Validate(netConn net.Conn, session SessionID) error
+    }
+
+    class MessageHandler {
+        <<interface>>
+        +HandleMessage(message *Message, session SessionID) error
+    }
+
+    class sessions.Service {
+        <<interface>>
+        +SendToEntity(message *fix.Message, entityID string) error
+        +RegisterEntity(entityID string, sessionID fix.SessionID)
+        +UnregisterEntity(entityID string, sessionID fix.SessionID)
+        +GetSessionsForEntity(entityID string) []fix.SessionID
+        +GetEntitiesForSession(sessionID fix.SessionID) []string
+        +Validate(netConn net.Conn, session fix.SessionID) error
+    }
+
+    class stp.Service {
+        <<interface>>
+        +Start() error
+        +Stop()
+    }
+
+    class whitelist.Service {
+        <<interface>>
+        +IsWhitelisted(institution uuid.UUID) bool
+        +SetWhitelisted(institution uuid.UUID, whitelisted bool)
+    }
+
+    %% Relationships
+    DefaultService ..|> Service : implements
+    MockService ..|> Service : implements
+    DefaultRepository ..|> Repository : implements
+    MockRepository ..|> Repository : implements
+    SessionService ..|> sessions.Service : implements
+    STPService ..|> stp.Service : implements
+    WhitelistService ..|> whitelist.Service : implements
+    
+    DefaultService --> Repository : uses
+    SessionService --> ConnectionValidator : implements
+    STPService --> broker.Broker : uses
+    STPService --> sessions.Service : uses
+    STPService --> whitelist.Service : uses
+    STPService --> fix.Acceptor : uses
+    
+    SessionService --> fix.Acceptor : uses
+    FixAcceptor --> ConnectionValidator : uses
+    FixAcceptor --> MessageHandler : uses
+    FixAcceptor --> SessionsMap : contains
+    
+    ExampleController --> examples.Service : uses
+    ExampleController --> validator.Validator : uses
+    
+    DefaultRepository --> bun.DB : uses
+    ConfigRepository --> config.InstitutionInMemoryForFIX : uses

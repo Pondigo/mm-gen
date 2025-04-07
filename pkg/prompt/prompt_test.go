@@ -142,18 +142,20 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 	}
 
 	for _, tc := range testCases {
-		s.Run(fmt.Sprintf("DiagramType=%s", tc.diagramType), func() {
+		tc := tc // Capture range variable
+		testName := fmt.Sprintf("DiagramType=%s", tc.diagramType)
+		s.Run(testName, func() {
 			prompt, err := s.templateManager.GetDiagramPrompt(s.sampleGoCode, tc.diagramType)
 
 			if tc.expectError {
-				assert.Error(s.T(), err, "Expected error for diagram type %s, but got none", tc.diagramType)
+				s.Error(err, "Expected error for diagram type %s, but got none", tc.diagramType)
 				return
 			}
 
-			assert.NoError(s.T(), err, "Unexpected error for diagram type %s", tc.diagramType)
+			s.NoError(err, "Unexpected error for diagram type %s", tc.diagramType)
 
 			// Verify the prompt contains the sample code
-			assert.Contains(s.T(), prompt, s.sampleGoCode, "Prompt does not contain the sample code for diagram type %s", tc.diagramType)
+			s.Contains(prompt, s.sampleGoCode, "Prompt does not contain the sample code for diagram type %s", tc.diagramType)
 
 			// Verify the prompt contains common expected elements
 			expectedElements := []string{
@@ -162,7 +164,7 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 			}
 
 			for _, element := range expectedElements {
-				assert.Contains(s.T(), prompt, element, "Prompt does not contain expected element %q for diagram type %s", element, tc.diagramType)
+				s.Contains(prompt, element, "Prompt does not contain expected element %q for diagram type %s", element, tc.diagramType)
 			}
 		})
 	}
@@ -172,7 +174,7 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 func (s *PromptTestSuite) TestGetFixPrompt() {
 	// Test getting fix prompt
 	prompt, err := s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 1, 3)
-	assert.NoError(s.T(), err, "Unexpected error getting fix prompt")
+	s.NoError(err, "Unexpected error getting fix prompt")
 
 	// Verify the prompt contains important elements
 	expectedElements := []string{
@@ -182,21 +184,21 @@ func (s *PromptTestSuite) TestGetFixPrompt() {
 	}
 
 	for _, element := range expectedElements {
-		assert.Contains(s.T(), prompt, element, "Fix prompt does not contain expected element %q", element)
+		s.Contains(prompt, element, "Fix prompt does not contain expected element %q", element)
 	}
 
 	// Test with retry info
 	prompt, err = s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 2, 3)
-	assert.NoError(s.T(), err, "Unexpected error getting fix prompt with retry")
+	s.NoError(err, "Unexpected error getting fix prompt with retry")
 
-	assert.Contains(s.T(), prompt, "This is fix attempt 2/3", "Fix prompt does not contain retry information")
+	s.Contains(prompt, "This is fix attempt 2/3", "Fix prompt does not contain retry information")
 }
 
 // TestGetExplanationPrompt tests generating prompts for explaining errors
 func (s *PromptTestSuite) TestGetExplanationPrompt() {
 	// Test getting explanation prompt
 	prompt, err := s.templateManager.GetExplanationPrompt(s.sampleDiagram, s.validationResult)
-	assert.NoError(s.T(), err, "Unexpected error getting explanation prompt")
+	s.NoError(err, "Unexpected error getting explanation prompt")
 
 	// Verify the prompt contains important elements
 	expectedElements := []string{
@@ -205,7 +207,7 @@ func (s *PromptTestSuite) TestGetExplanationPrompt() {
 	}
 
 	for _, element := range expectedElements {
-		assert.Contains(s.T(), prompt, element, "Explanation prompt does not contain expected element %q", element)
+		s.Contains(prompt, element, "Explanation prompt does not contain expected element %q", element)
 	}
 }
 

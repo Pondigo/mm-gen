@@ -8,7 +8,6 @@ import (
 	"text/template"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"mm-go-agent/pkg/mermaid"
@@ -69,14 +68,14 @@ classDiagram
 func (s *PromptTestSuite) SetupTest() {
 	// Create a temporary directory
 	tempDir, err := os.MkdirTemp("", "prompt-test")
-	require.NoError(s.T(), err, "Failed to create temp directory")
+	s.Require().NoError(err, "Failed to create temp directory")
 
 	// Create templates directory
 	templatesDir := filepath.Join(tempDir, "templates")
 	err = os.Mkdir(templatesDir, 0755)
 	if err != nil {
 		os.RemoveAll(tempDir)
-		require.NoError(s.T(), err, "Failed to create templates directory")
+		s.Require().NoError(err, "Failed to create templates directory")
 	}
 
 	// Create sample templates
@@ -96,7 +95,7 @@ func (s *PromptTestSuite) SetupTest() {
 		err := os.WriteFile(filepath.Join(templatesDir, filename), []byte(content), 0644)
 		if err != nil {
 			os.RemoveAll(tempDir)
-			require.NoError(s.T(), err, "Failed to write template file %s", filename)
+			s.Require().NoError(err, "Failed to write template file %s", filename)
 		}
 	}
 
@@ -105,7 +104,7 @@ func (s *PromptTestSuite) SetupTest() {
 	// Create template manager
 	templatesDir = filepath.Join(tempDir, "templates")
 	tmpl, err := template.ParseGlob(filepath.Join(templatesDir, "*.tmpl"))
-	require.NoError(s.T(), err, "Failed to parse templates")
+	s.Require().NoError(err, "Failed to parse templates")
 
 	s.templateManager = &TemplateManager{
 		templates: tmpl,
@@ -121,7 +120,7 @@ func (s *PromptTestSuite) TearDownTest() {
 
 // TestLoadTemplates tests that the template manager can be created
 func (s *PromptTestSuite) TestLoadTemplates() {
-	assert.NotNil(s.T(), s.templateManager, "Template manager should not be nil")
+	s.NotNil(s.templateManager, "Template manager should not be nil")
 }
 
 // TestGetDiagramPrompt tests generating prompts for different diagram types
@@ -143,19 +142,18 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 
 	for _, tc := range testCases {
 		tc := tc // Capture range variable
-		testName := fmt.Sprintf("DiagramType=%s", tc.diagramType)
-		s.Run(testName, func() {
+		s.T().Run(fmt.Sprintf("DiagramType=%s", tc.diagramType), func(t *testing.T) {
 			prompt, err := s.templateManager.GetDiagramPrompt(s.sampleGoCode, tc.diagramType)
 
 			if tc.expectError {
-				s.Error(err, "Expected error for diagram type %s, but got none", tc.diagramType)
+				assert.Error(t, err, "Expected error for diagram type %s, but got none", tc.diagramType)
 				return
 			}
 
-			s.NoError(err, "Unexpected error for diagram type %s", tc.diagramType)
+			assert.NoError(t, err, "Unexpected error for diagram type %s", tc.diagramType)
 
 			// Verify the prompt contains the sample code
-			s.Contains(prompt, s.sampleGoCode, "Prompt does not contain the sample code for diagram type %s", tc.diagramType)
+			assert.Contains(t, prompt, s.sampleGoCode, "Prompt does not contain the sample code for diagram type %s", tc.diagramType)
 
 			// Verify the prompt contains common expected elements
 			expectedElements := []string{
@@ -164,7 +162,7 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 			}
 
 			for _, element := range expectedElements {
-				s.Contains(prompt, element, "Prompt does not contain expected element %q for diagram type %s", element, tc.diagramType)
+				assert.Contains(t, prompt, element, "Prompt does not contain expected element %q for diagram type %s", element, tc.diagramType)
 			}
 		})
 	}
@@ -174,7 +172,7 @@ func (s *PromptTestSuite) TestGetDiagramPrompt() {
 func (s *PromptTestSuite) TestGetFixPrompt() {
 	// Test getting fix prompt
 	prompt, err := s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 1, 3)
-	s.NoError(err, "Unexpected error getting fix prompt")
+	s.Require().NoError(err, "Unexpected error getting fix prompt")
 
 	// Verify the prompt contains important elements
 	expectedElements := []string{
@@ -189,7 +187,7 @@ func (s *PromptTestSuite) TestGetFixPrompt() {
 
 	// Test with retry info
 	prompt, err = s.templateManager.GetFixPrompt(s.sampleDiagram, s.validationResult, 2, 3)
-	s.NoError(err, "Unexpected error getting fix prompt with retry")
+	s.Require().NoError(err, "Unexpected error getting fix prompt with retry")
 
 	s.Contains(prompt, "This is fix attempt 2/3", "Fix prompt does not contain retry information")
 }
@@ -198,7 +196,7 @@ func (s *PromptTestSuite) TestGetFixPrompt() {
 func (s *PromptTestSuite) TestGetExplanationPrompt() {
 	// Test getting explanation prompt
 	prompt, err := s.templateManager.GetExplanationPrompt(s.sampleDiagram, s.validationResult)
-	s.NoError(err, "Unexpected error getting explanation prompt")
+	s.Require().NoError(err, "Unexpected error getting explanation prompt")
 
 	// Verify the prompt contains important elements
 	expectedElements := []string{

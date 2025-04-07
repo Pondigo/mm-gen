@@ -1,13 +1,14 @@
 module mm-go-agent
 
-go 1.24.1
+go 1.22.0
+
+toolchain go1.24.1
 
 require (
 	github.com/anz-bank/mermaid-go v0.1.1
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.13
-	github.com/yuin/goldmark v1.7.8
 )
 
 require (

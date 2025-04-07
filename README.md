@@ -1,5 +1,7 @@
 # Mermaid Diagram Generator and Validator
 
+[![codecov](https://codecov.io/gh/Pondigo/mm-gen/branch/main/graph/badge.svg)](https://codecov.io/gh/Pondigo/mm-gen)
+
 A Go tool for generating and validating Mermaid diagrams.
 
 ## Features

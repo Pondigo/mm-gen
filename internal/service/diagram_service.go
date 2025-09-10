@@ -84,7 +84,7 @@ func (s *diagramService) GenerateDiagram(ctx context.Context, filePath string, d
 		fmt.Printf("Diagram for file %s has syntax errors, attempting to fix...\n", filePath)
 
 		// Create validation service for fixing diagrams
-		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter), nil)
 
 		// Try to fix the diagram
 		fixedDiagram, err := s.retryWithBackoff(ctx, "fix-file-diagram", func() (string, error) {
@@ -156,7 +156,7 @@ func (s *diagramService) GenerateComponentDiagram(ctx context.Context, component
 		fmt.Printf("Diagram for %s %s has syntax errors, attempting to fix...\n", componentType, componentName)
 
 		// Create validation service for fixing diagrams
-		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter), nil)
 
 		// Try to fix the diagram
 		fixedDiagram, err := s.retryWithBackoff(ctx, fmt.Sprintf("fix-%s-%s-diagram", componentType, componentName), func() (string, error) {
@@ -255,7 +255,7 @@ func (s *diagramService) GenerateProjectDiagram(ctx context.Context, diagramType
 		fmt.Printf("Project diagram for type %s has syntax errors, attempting to fix...\n", diagramType)
 
 		// Create validation service for fixing diagrams
-		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+		validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter), nil)
 
 		// Try to fix the diagram
 		fixedDiagram, err := s.retryWithBackoff(ctx, fmt.Sprintf("fix-project-%s-diagram", diagramType), func() (string, error) {
@@ -330,7 +330,7 @@ func (s *diagramService) generateConcurrentClassDiagram(ctx context.Context) (st
 	resultCh := make(chan diagramResult, len(componentTypes))
 
 	// Create a validation service for fixing diagrams
-	validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter))
+	validationService := NewValidationService(llm.NewClientAdapter(s.llmAdapter), nil)
 
 	// Create a semaphore to limit concurrent LLM API calls
 	// Using a buffered channel as a semaphore

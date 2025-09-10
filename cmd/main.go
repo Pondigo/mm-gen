@@ -13,6 +13,7 @@ import (
 	"mm-go-agent/internal/adapter/llm"
 	"mm-go-agent/internal/adapter/renderer"
 	"mm-go-agent/internal/repository"
+	fileLoggerRepo "mm-go-agent/internal/repository/file"
 	fileOutputRepo "mm-go-agent/internal/repository/file"
 	"mm-go-agent/internal/service"
 	"mm-go-agent/internal/service/diagram"
@@ -141,6 +142,10 @@ func main() {
 	retriesFlag := 0
 	validateCmd.Flags().IntVarP(&retriesFlag, "retries", "r", 0, "Maximum number of retries for fixing (0 = use default/env var)")
 
+	// Add log directory flag for training data collection
+	logDirFlag := ""
+	validateCmd.Flags().StringVarP(&logDirFlag, "log-dir", "l", "", "Directory to save logs for training data (default: logs)")
+
 	rootCmd.AddCommand(fileCmd, componentCmd, mapCmd, validateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -255,6 +260,7 @@ func validateDiagram(diagram string, cmd *cobra.Command) {
 	fixFlag, _ := cmd.Flags().GetBool("fix")
 	verboseFlag, _ := cmd.Flags().GetBool("verbose")
 	retriesFlag, _ := cmd.Flags().GetInt("retries")
+	logDirFlag, _ := cmd.Flags().GetString("log-dir")
 
 	// If retries flag is set, use it to override the environment variable
 	if retriesFlag > 0 {
@@ -262,6 +268,25 @@ func validateDiagram(diagram string, cmd *cobra.Command) {
 		if verboseFlag {
 			fmt.Printf("Setting maximum retries to %d\n", retriesFlag)
 		}
+	}
+
+	// Initialize logger repository regardless of fix/explain flags
+	var loggerRepo repository.LoggerRepository
+	var err error
+
+	// Use command line flag, environment variable, or default to user's home directory
+	logDir := logDirFlag
+	if logDir == "" {
+		logDir = os.Getenv("MERMAID_LOG_DIR")
+	}
+
+	loggerRepo, err = fileLoggerRepo.NewLoggerRepository(logDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to initialize logger: %v\n", err)
+		// Continue without logger
+		loggerRepo = nil
+	} else if verboseFlag {
+		fmt.Printf("Logger initialized successfully\n")
 	}
 
 	// Initialize Claude adapter if we need to fix or explain errors
@@ -278,7 +303,7 @@ func validateDiagram(diagram string, cmd *cobra.Command) {
 	}
 
 	// Create validation service
-	validationService := service.NewValidationService(llmClient)
+	validationService := service.NewValidationService(llmClient, loggerRepo)
 
 	// Validate the diagram
 	validationResult, validationErr := validationService.ValidateMermaidDiagram(diagram)

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"mm-go-agent/internal/repository"
 	"mm-go-agent/pkg/llm"
 	"mm-go-agent/pkg/mermaid"
 	"os"
@@ -19,10 +20,11 @@ type ValidationService struct {
 	llmClient  llm.Client
 	promptMgr  *prompt.TemplateManager
 	maxRetries int
+	logger     repository.LoggerRepository
 }
 
 // NewValidationService creates a new validation service with the given LLM client
-func NewValidationService(llmClient llm.Client) *ValidationService {
+func NewValidationService(llmClient llm.Client, logger repository.LoggerRepository) *ValidationService {
 	// Get max retries from environment variable or use default
 	maxRetries := MaxFixRetries
 	if envRetries := os.Getenv("MERMAID_FIX_RETRIES"); envRetries != "" {
@@ -42,12 +44,22 @@ func NewValidationService(llmClient llm.Client) *ValidationService {
 		llmClient:  llmClient,
 		promptMgr:  promptMgr,
 		maxRetries: maxRetries,
+		logger:     logger,
 	}
 }
 
 // ValidateMermaidDiagram validates a Mermaid diagram and returns the validation result
 func (s *ValidationService) ValidateMermaidDiagram(diagram string) (mermaid.ValidationResult, error) {
 	result := mermaid.ValidateSyntax(diagram)
+
+	// Log validation result if logger is available
+	if s.logger != nil {
+		if err := s.logger.LogValidation(diagram, result); err != nil {
+			// Just log the error but don't fail the operation
+			fmt.Fprintf(os.Stderr, "Failed to log validation: %v\n", err)
+		}
+	}
+
 	return result, nil
 }
 
@@ -127,9 +139,25 @@ Only respond with the corrected Mermaid diagram code, without any explanations o
 			return "", fmt.Errorf("error generating fixed diagram (attempt %d): %w", fixAttempts, err)
 		}
 
+		// Log the prompt and response for fine-tuning
+		if s.logger != nil {
+			if logErr := s.logger.LogPromptResponse(prompt, response, currentDiagram, "fix_prompt_response"); logErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to log prompt-response: %v\n", logErr)
+			}
+		}
+
 		// Re-validate the fixed diagram
 		fixedDiagram := response
 		fixedResult := mermaid.ValidateSyntax(fixedDiagram)
+
+		// Log the fix attempt if logger is available
+		if s.logger != nil {
+			isSuccessful := fixedResult.IsValid
+			if err := s.logger.LogFixAttempt(diagram, currentResult, fixedDiagram, fixAttempts, isSuccessful); err != nil {
+				// Just log the error but don't fail the operation
+				fmt.Fprintf(os.Stderr, "Failed to log fix attempt: %v\n", err)
+			}
+		}
 
 		// If the diagram is now valid, return it
 		if fixedResult.IsValid {
@@ -202,6 +230,21 @@ Use a friendly, educational tone as if you're teaching someone about Mermaid syn
 	response, err := s.llmClient.GenerateText(ctx, prompt)
 	if err != nil {
 		return "", fmt.Errorf("error generating error explanation: %w", err)
+	}
+
+	// Log the prompt and response for fine-tuning
+	if s.logger != nil {
+		if logErr := s.logger.LogPromptResponse(prompt, response, validationResult.Diagram, "explain_prompt_response"); logErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to log prompt-response: %v\n", logErr)
+		}
+	}
+
+	// Log the explanation if logger is available
+	if s.logger != nil {
+		if err := s.logger.LogExplanation(validationResult, response); err != nil {
+			// Just log the error but don't fail the operation
+			fmt.Fprintf(os.Stderr, "Failed to log explanation: %v\n", err)
+		}
 	}
 
 	return response, nil
